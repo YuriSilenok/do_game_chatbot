@@ -1,13 +1,16 @@
-import argparse
 import json
+import sys
 import urllib.error
 import urllib.request
+from urllib.parse import quote
+
+SERVER_URL = "http://127.0.0.1:8000"
 
 
-def post_message(server: str, room: str, sender: str, text: str) -> None:
-    payload = json.dumps({"sender": sender, "text": text}, ensure_ascii=False).encode("utf-8")
+def send_message(url: str, name: str, text: str) -> None:
+    payload = json.dumps({"sender": name, "text": text}, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
-        f"{server.rstrip('/')}/api/rooms/{room}/messages",
+        url,
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -23,23 +26,25 @@ def post_message(server: str, room: str, sender: str, text: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Отправка сообщений и команд в танковый чат")
-    parser.add_argument("--server", default="http://127.0.0.1:8000", help="Адрес сервера")
-    parser.add_argument("--room", required=True, help="Номер комнаты")
-    parser.add_argument("--name", required=True, help="Имя в чате")
-    args = parser.parse_args()
+    room = input("Комната: ").strip()
+    name = input("Имя: ").strip()
+    if not room or not name:
+        print("Нужно указать номер комнаты и имя.", file=sys.stderr)
+        return
+    url = f"{SERVER_URL.rstrip('/')}/api/rooms/{quote(room, safe='')}/messages"
 
     try:
         while True:
             text = input()
             if text.strip():
-                post_message(args.server, args.room, args.name, text)
-    except EOFError:
-        return
-    except KeyboardInterrupt:
+                send_message(url, name, text)
+    except (EOFError, KeyboardInterrupt):
         return
     except RuntimeError as error:
-        parser.exit(1, f"{error}\n")
+        print(f"Ошибка: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+    except (EOFError, KeyboardInterrupt):
+        return
 
 
 if __name__ == "__main__":

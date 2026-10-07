@@ -4,7 +4,6 @@ const ctx = board.getContext("2d");
 const statusLabel = document.querySelector("#room-status");
 const hint = document.querySelector("#hint");
 const chat = document.querySelector("#chat");
-const chatForm = document.querySelector("#chat-form");
 const STATE_POLL_INTERVAL_MS = 100;
 const ROOM_LIST_POLL_INTERVAL_MS = 2000;
 let state = null;
@@ -147,8 +146,10 @@ async function pollState() {
       : "";
     statusLabel.textContent = `${next.status} · танков: ${next.tanks_alive}${countdown}`;
     hint.textContent = next.status === "waiting"
-      ? "Чтобы зарегистрироваться, отправьте в чат: «войти " + roomId + " Имя»."
-      : next.status === "countdown" ? "Регистрация ещё открыта. Танки появятся после отсчёта." : "Раунд идёт.";
+      ? "Для регистрации отправьте в терминальном клиенте: «войти " + roomId + " Имя»."
+      : next.status === "countdown"
+        ? "Регистрация открыта. Танки появятся после отсчёта."
+        : "Раунд идёт. Команды доступны через терминальный клиент.";
   } finally {
     polling = false;
   }
@@ -158,26 +159,6 @@ select.addEventListener("change", () => {
   shownRoom = "";
   chat.dataset.latest = "0";
   pollState().catch(error => { statusLabel.textContent = error.message; });
-});
-
-chatForm.addEventListener("submit", async event => {
-  event.preventDefault();
-  const sender = document.querySelector("#chat-name").value.trim();
-  const text = document.querySelector("#chat-text").value.trim();
-  if (!select.value || !sender || !text) return;
-  try {
-    const response = await fetch(`/api/rooms/${encodeURIComponent(select.value)}/messages`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sender, text })
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.detail || "Не удалось отправить сообщение.");
-    document.querySelector("#chat-text").value = "";
-    await pollState();
-  } catch (error) {
-    statusLabel.textContent = error.message;
-  }
 });
 
 loadRooms().then(pollState).catch(error => { statusLabel.textContent = error.message; });
