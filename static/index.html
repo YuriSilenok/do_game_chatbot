@@ -16,16 +16,12 @@
   <main>
     <section class="arena">
       <canvas id="board" aria-label="Игровое поле"></canvas>
-      <p id="hint">Выберите комнату. Чтобы зарегистрироваться, отправьте в чат: «войти НОМЕР Имя».</p>
+      <p id="hint">Выберите комнату. Для отправки сообщений и команд используйте терминальный клиент.</p>
     </section>
     <section class="chat-panel">
       <h2>Чат комнаты</h2>
       <ol id="chat"></ol>
-      <form id="chat-form">
-        <input id="chat-name" maxlength="40" placeholder="Ваше имя" required>
-        <input id="chat-text" maxlength="500" placeholder="Сообщение или команда" required>
-        <button>Отправить</button>
-      </form>
+      <p>Только просмотр. Для регистрации и отправки команд используйте терминальный клиент.</p>
     </section>
   </main>
   <script src="/static/game.js"></script>

@@ -17,7 +17,19 @@ class GameTests(unittest.TestCase):
         message = self.game.post_message(self.room, "Аня", " ВОЙТИ 1 Аня ")
         self.assertEqual(self.room.registrations, ["Аня"])
         self.assertEqual(self.room.phase, "countdown")
+        self.assertGreater(self.room.countdown_ends_at, time.time())
         self.assertFalse(message["is_command"])
+
+    def test_first_join_starts_countdown_without_restarting_it_for_next_player(self):
+        self.game.join(self.room, "Аня")
+        countdown_ends_at = self.room.countdown_ends_at
+        self.assertEqual(self.room.phase, "countdown")
+        self.assertGreater(countdown_ends_at, time.time())
+
+        self.game.join(self.room, "Борис")
+
+        self.assertEqual(self.room.countdown_ends_at, countdown_ends_at)
+        self.assertEqual(self.room.registrations, ["Аня", "Борис"])
 
     def test_join_command_rejects_other_room(self):
         with self.assertRaisesRegex(ValueError, "не совпадает"):
