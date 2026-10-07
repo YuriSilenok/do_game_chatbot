@@ -107,16 +107,28 @@ async def join_room(room_id: str, payload: JoinRequest):
         game.join(room, payload.name)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return game.room_summary(room)
+
+    tank = next(
+        (t for t in room.tanks
+         if not t.is_bot and t.name.casefold() == payload.name.strip().casefold()),
+        None,
+    )
+    return {
+        **game.room_summary(room),
+        "your_color": tank.color if tank else None,
+        "your_tank_id": tank.id if tank else None,
+    }
 
 
 @app.post("/api/rooms/{room_id}/messages", status_code=status.HTTP_201_CREATED)
 async def send_message(room_id: str, payload: MessageRequest):
     room = find_room(room_id)
     try:
-        return game.post_message(room, payload.sender, payload.text)
+        game.post_message(room, payload.sender, payload.text)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # Ничего не возвращаем — клиенту не нужен ответ.
+    return Response(status_code=status.HTTP_201_CREATED)
 
 
 @app.post("/api/rooms/{room_id}/commands", status_code=status.HTTP_201_CREATED)
@@ -126,9 +138,10 @@ async def send_command(room_id: str, payload: MessageRequest):
     if normalized not in {"вверх", "вниз", "влево", "вправо", "выстрел"}:
         raise HTTPException(status_code=422, detail="Неизвестная команда.")
     try:
-        return game.post_message(room, payload.sender, normalized)
+        game.post_message(room, payload.sender, normalized)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_201_CREATED)
 
 
 @app.get("/api/rooms/{room_id}/state")

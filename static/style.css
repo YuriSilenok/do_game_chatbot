@@ -8,6 +8,12 @@ main { display: flex; gap: 1rem; padding: 1rem; height: calc(100vh - 4.2rem); }
 .arena { min-width: 0; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 #board { width: min(100%, 100%); aspect-ratio: 2/1; image-rendering: pixelated; background: #080d10; }
 #hint { text-align: center; color: #bac7ce; }
+.stats { width: min(100%, 900px); background: #202c35; border-radius: .5rem; padding: .6rem 1rem; margin-bottom: .6rem; }
+.stats h2 { margin: 0 0 .4rem; font-size: 1rem; color: #cdd9df; }
+.stats ol { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: .3rem .8rem; }
+.stats li { display: flex; justify-content: space-between; gap: .6rem; padding: .25rem .4rem; background: #111820; border-radius: .25rem; }
+.stats li.empty { justify-content: center; color: #7d8a93; background: transparent; }
+.stats li strong { color: #ffe96d; }
 .chat-panel { flex: 0 0 min(33vw, 440px); display: flex; flex-direction: column; min-width: 270px; background: #202c35; padding: .8rem; border-radius: .5rem; }
 .chat-panel h2 { margin: 0 0 .5rem; }
 #chat { margin: 0; padding: .5rem 0 .5rem 1.8rem; overflow-y: auto; flex: 1; overflow-wrap: anywhere; }
@@ -27,4 +33,5 @@ button { cursor: pointer; background: #165b74; }
   .chat-panel { flex: auto; min-height: 45vh; }
   #board { width: min(100%, 80vh); }
   header { flex-wrap: wrap; }
+  .stats { width: 100%; }
 }

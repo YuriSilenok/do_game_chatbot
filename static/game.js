@@ -4,6 +4,7 @@ const ctx = board.getContext("2d");
 const statusLabel = document.querySelector("#room-status");
 const hint = document.querySelector("#hint");
 const chat = document.querySelector("#chat");
+const winsList = document.querySelector("#wins-list");
 const STATE_POLL_INTERVAL_MS = 100;
 const ROOM_LIST_POLL_INTERVAL_MS = 2000;
 let state = null;
@@ -11,6 +12,26 @@ let previousTanks = new Map();
 let receivedAt = 0;
 let shownRoom = "";
 let polling = false;
+
+// Соответствие русских названий цветов (как их отдаёт сервер)
+// и CSS-цветов для canvas. Canvas понимает только CSS-цвета,
+// поэтому «красный» нужно превратить в «#e6194b» и т.д.
+const TANK_COLOR_CSS = {
+  "красный":    "#e6194b",
+  "зелёный":    "#3cb44b",
+  "синий":      "#4363d8",
+  "оранжевый":  "#f58231",
+  "фиолетовый": "#911eb4",
+  "маджента":   "#f032e6",
+  "лайм":       "#bfef45",
+  "голубой":    "#42d4f4",
+  "серый":      "#808080",
+};
+
+function colorToCss(color, isBot) {
+  if (isBot) return TANK_COLOR_CSS["серый"];
+  return TANK_COLOR_CSS[color] || TANK_COLOR_CSS["серый"];
+}
 
 function tileColor(type) {
   return ({ 1: "#b76537", 2: "#87939a", 3: "#2474a1", 4: "#397447", 5: "#a5e7ef", 6: "#e3b837" })[type] || "#111820";
@@ -87,12 +108,7 @@ function draw() {
     const from = previousTanks.get(tank.id) || tank;
     const x = from.x + (tank.x - from.x) * interpolation;
     const y = from.y + (tank.y - from.y) * interpolation;
-    drawTank(x, y, tank.direction, tank.is_bot, tank.shielded);
-    ctx.fillStyle = "#fff";
-    ctx.font = ".15px system-ui";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "bottom";
-    ctx.fillText(tank.name, x, y - .46);
+    drawTank(x, y, tank.direction, tank.is_bot, tank.shielded, tank.color);
   }
   const remaining = state && state.countdown_ends_at ? remainingSeconds(state, performance.now()) : null;
   if (remaining != null) {
@@ -146,8 +162,8 @@ function drawBonus(type, cx, cy) {
   }
 }
 
-function drawTank(x, y, direction, isBot, shielded) {
-  const base = isBot ? "#e07e42" : "#55c7a4";
+function drawTank(x, y, direction, isBot, shielded, color) {
+  const base = colorToCss(color, isBot);
   ctx.save();
   ctx.translate(x, y);
   if (direction === "вниз") ctx.rotate(Math.PI);
@@ -190,6 +206,25 @@ function showMessages(messages, roomId) {
   chat.scrollTop = chat.scrollHeight;
 }
 
+function showWins(wins) {
+  if (!winsList) return;
+  const entries = Object.entries(wins || {});
+  if (!entries.length) {
+    winsList.innerHTML = '<li class="empty">Пока нет побед</li>';
+    return;
+  }
+  winsList.replaceChildren();
+  for (const [name, count] of entries) {
+    const item = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = name;
+    const value = document.createElement("strong");
+    value.textContent = String(count);
+    item.append(label, value);
+    winsList.append(item);
+  }
+}
+
 async function loadRooms() {
   const response = await fetch("/api/rooms");
   if (!response.ok) throw new Error("Не удалось загрузить список комнат.");
@@ -220,6 +255,7 @@ async function pollState() {
     if (!roomId) {
       state = null;
       statusLabel.textContent = "Нет выбранной комнаты";
+      showWins({});
       return;
     }
     const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/state`);
@@ -230,6 +266,7 @@ async function pollState() {
     state = next;
     receivedAt = performance.now();
     showMessages(next.messages, roomId);
+    showWins(next.wins);
     statusLabel.textContent = `${next.status} · танков: ${next.tanks_alive}${countdownLabel(next)}`;
     hint.textContent = next.status === "waiting"
       ? "Для регистрации отправьте в терминальном клиенте: «войти " + roomId + " Имя»."
