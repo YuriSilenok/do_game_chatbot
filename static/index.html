@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Танковый чат</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Танковый чат</h1>
+    <label>Комната <select id="room-select"><option value="">Загрузка…</option></select></label>
+    <span id="room-status">Подключение…</span>
+    <a href="/admin">Админка</a>
+  </header>
+  <main>
+    <section class="arena">
+      <canvas id="board" aria-label="Игровое поле"></canvas>
+      <p id="hint">Выберите комнату. Чтобы зарегистрироваться, отправьте в чат: «войти НОМЕР Имя».</p>
+    </section>
+    <section class="chat-panel">
+      <h2>Чат комнаты</h2>
+      <ol id="chat"></ol>
+      <form id="chat-form">
+        <input id="chat-name" maxlength="40" placeholder="Ваше имя" required>
+        <input id="chat-text" maxlength="500" placeholder="Сообщение или команда" required>
+        <button>Отправить</button>
+      </form>
+    </section>
+  </main>
+  <script src="/static/game.js"></script>
+</body>
+</html>

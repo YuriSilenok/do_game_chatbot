@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Управление комнатами</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+  <header><h1>Управление комнатами</h1><a href="/">К игре</a></header>
+  <main>
+    <form id="create-room">
+      <label>Название комнаты <input id="room-name" maxlength="60" value="Комната" required></label>
+      <button>Создать комнату</button>
+    </form>
+    <p id="admin-error" role="status"></p>
+    <ul id="rooms"></ul>
+  </main>
+  <script src="/static/admin.js"></script>
+</body>
+</html>
