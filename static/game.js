@@ -17,42 +17,63 @@ function tileColor(type) {
 }
 
 function draw() {
-  const size = Math.min(board.clientWidth, board.clientHeight);
-  if (!size) return;
-  const ratio = window.devicePixelRatio || 1;
-  const pixels = Math.round(size * ratio);
-  if (board.width !== pixels || board.height !== pixels) {
-    board.width = pixels;
-    board.height = pixels;
-  }
-  ctx.setTransform(pixels / 13, 0, 0, pixels / 13, 0, 0);
-  ctx.fillStyle = "#111820";
-  ctx.fillRect(0, 0, 13, 13);
-
   if (!state) {
     requestAnimationFrame(draw);
     return;
   }
+  const mapWidth = state.map?.width || 26;
+  const mapHeight = state.map?.height || 13;
+  const canvasLeft = document.querySelector(".arena > #board") || board;
+  const size = Math.min(canvasLeft.clientWidth || 800, canvasLeft.clientHeight || 600);
+  if (!size) {
+    requestAnimationFrame(draw);
+    return;
+  }
+  const maxByHeight = (canvasLeft.clientHeight || 600) / mapHeight * mapWidth;
+  const pixels = Math.min(Math.round(size * (window.devicePixelRatio || 1)), Math.round((canvasLeft.clientWidth || 800) * (window.devicePixelRatio || 1)), Math.round(maxByHeight * (window.devicePixelRatio || 1)));
+  if (board.width !== pixels || board.height !== Math.round(pixels / mapWidth * mapHeight)) {
+    board.width = pixels;
+    board.height = Math.round(pixels / mapWidth * mapHeight);
+  }
+  const scale = pixels / mapWidth;
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.fillStyle = "#111820";
+  ctx.fillRect(0, 0, mapWidth, mapHeight);
+
   for (const block of state.blocks) {
-    ctx.fillStyle = tileColor(block.type);
-    ctx.fillRect(block.x + .04, block.y + .04, .92, .92);
+    ctx.fillStyle = block.type === 4 ? "rgba(36,116,161,.85)" : tileColor(block.type);
+    ctx.fillRect(block.x, block.y, 1, 1);
     if (block.type === 1) {
+      ctx.fillStyle = "#b76537";
+      ctx.fillRect(block.x + .06, block.y + .06, .88, .88);
+      ctx.fillStyle = "#8d4b26";
+      for (const [ox, oy, w, h] of [[.06, .06, .88, .26], [.06, .68, .88, .26], [.68, .06, .26, .88]]) {
+        ctx.fillRect(block.x + ox, block.y + oy, w, h);
+      }
       ctx.strokeStyle = "#754225";
       ctx.lineWidth = .045;
-      ctx.strokeRect(block.x + .08, block.y + .08, .84, .84);
+      ctx.strokeRect(block.x + .07, block.y + .07, .86, .86);
     }
-    if (block.type === 4) {
-      ctx.fillStyle = "#183c24";
-      ctx.beginPath();
-      ctx.arc(block.x + .5, block.y + .5, .13, 0, Math.PI * 2);
-      ctx.fill();
+    if (block.type === 2) {
+      ctx.fillStyle = "#c7d3da";
+      ctx.fillRect(block.x + .12, block.y + .12, .76, .76);
+      ctx.fillStyle = "#9aa8b0";
+      ctx.fillRect(block.x + .04, block.y + .04, .92, .92);
+      ctx.strokeStyle = "#78888f";
+      ctx.lineWidth = .05;
+      ctx.strokeRect(block.x + .04, block.y + .04, .92, .92);
+    }
+    if (block.type === 5) {
+      ctx.fillStyle = "#b8edf4";
+      for (const [dx, dy] of [[.12, .18], [.2, .48], [.18, .76], [.7, .2], [.68, .52], [.74, .78]]) {
+        ctx.beginPath();
+        ctx.arc(block.x + dx, block.y + dy, .11, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
   }
   for (const bonus of state.bonuses) {
-    ctx.fillStyle = bonus.type === "звезда" ? "#ffe96d" : bonus.type === "шлем" ? "#90eaff" : "#e8b4ff";
-    ctx.beginPath();
-    ctx.arc(bonus.x + .5, bonus.y + .5, .22, 0, Math.PI * 2);
-    ctx.fill();
+    drawBonus(bonus.type, bonus.x + .5, bonus.y + .5);
   }
   for (const shell of state.shells) {
     ctx.fillStyle = "#fff4b8";
@@ -66,32 +87,89 @@ function draw() {
     const from = previousTanks.get(tank.id) || tank;
     const x = from.x + (tank.x - from.x) * interpolation;
     const y = from.y + (tank.y - from.y) * interpolation;
-    const color = tank.is_bot ? "#e07e42" : "#55c7a4";
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(({ вверх: 0, вправо: Math.PI / 2, вниз: Math.PI, влево: -Math.PI / 2 })[tank.direction] || 0);
-    ctx.fillStyle = tank.shielded ? "#c6efff" : color;
-    ctx.fillRect(-.29, -.29, .58, .58);
-    ctx.fillStyle = "#172029";
-    ctx.fillRect(-.08, -.37, .16, .31);
-    ctx.restore();
+    drawTank(x, y, tank.direction, tank.is_bot, tank.shielded);
     ctx.fillStyle = "#fff";
-    ctx.font = ".16px system-ui";
+    ctx.font = ".15px system-ui";
     ctx.textAlign = "center";
-    ctx.fillText(tank.name, x, y - .38);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(tank.name, x, y - .46);
   }
-  for (const block of state.blocks) {
-    if (block.type !== 4) continue;
-    ctx.fillStyle = "#397447";
-    ctx.fillRect(block.x + .04, block.y + .04, .92, .92);
-    ctx.fillStyle = "#244f32";
-    for (const [dx, dy] of [[.25, .28], [.68, .4], [.42, .72]]) {
-      ctx.beginPath();
-      ctx.arc(block.x + dx, block.y + dy, .13, 0, Math.PI * 2);
-      ctx.fill();
-    }
+  const remaining = state && state.countdown_ends_at ? remainingSeconds(state, performance.now()) : null;
+  if (remaining != null) {
+    const remainingText = state.status === "countdown" ? Math.ceil(remaining).toString() : "0";
+    ctx.font = "5px system-ui";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.shadowColor = "rgba(0,0,0,.85)";
+    ctx.shadowBlur = .18;
+    ctx.fillStyle = "#ffe96d";
+    ctx.fillText(remainingText, mapWidth / 2, mapHeight / 2 - 1.5);
+    ctx.shadowBlur = 0;
+    ctx.font = ".65px system-ui";
+    ctx.fillStyle = "#f3f6f8";
+    ctx.fillText(state.status === "countdown" ? "СТАРТ ЧЕРЕЗ" : "РАУНД ИДЁТ", mapWidth / 2, mapHeight / 2 + .4);
   }
   requestAnimationFrame(draw);
+}
+
+function drawBonus(type, cx, cy) {
+  if (type === "звезда") {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(Math.PI / 4);
+    const outer = .20, inner = .085;
+    ctx.fillStyle = "#ffe96d";
+    ctx.strokeStyle = "#c9a227";
+    ctx.lineWidth = .035;
+    ctx.beginPath();
+    for (let i = 0; i < 8; i += 1) {
+      const radius = i % 2 === 0 ? outer : inner;
+      const angle = Math.PI / 4 * i;
+      const pointX = Math.cos(angle) * radius;
+      const pointY = Math.sin(angle) * radius;
+      if (i === 0) ctx.moveTo(pointX, pointY);
+      else ctx.lineTo(pointX, pointY);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  } else {
+    const colors = { шлем: "#72c1e9", часы: "#e3b8f2" };
+    ctx.fillStyle = colors[type] || "#e3b8f2";
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = .025;
+    ctx.beginPath();
+    ctx.arc(cx, cy, .24, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+function drawTank(x, y, direction, isBot, shielded) {
+  const base = isBot ? "#e07e42" : "#55c7a4";
+  ctx.save();
+  ctx.translate(x, y);
+  if (direction === "вниз") ctx.rotate(Math.PI);
+  else if (direction === "влево") ctx.rotate(-Math.PI / 2);
+  else if (direction === "вправо") ctx.rotate(Math.PI / 2);
+  ctx.fillStyle = shielded ? "#c6efff" : "#313c46";
+  ctx.fillRect(-.34, -.34, .68, .68);
+  ctx.strokeStyle = shielded ? "#ffffff" : "#141c22";
+  ctx.lineWidth = .06;
+  ctx.strokeRect(-.34, -.34, .68, .68);
+  ctx.fillStyle = shielded ? "#c6efff" : base;
+  ctx.fillRect(-.28, -.28, .56, .56);
+  ctx.fillStyle = shielded ? "#ffffff" : "#d9e2e8";
+  ctx.fillRect(-.18, -.18, .36, .36);
+  ctx.fillStyle = shielded ? "#c6efff" : "#0f171d";
+  ctx.fillRect(-.10, -.36, .20, .22);
+  ctx.fillRect(-.30, -.62, .26, .36);
+  ctx.fillRect(.04, -.62, .26, .36);
+  ctx.fillStyle = shielded ? "#ffffff" : base;
+  ctx.fillRect(-.30, -.62, .26, .20);
+  ctx.fillRect(.04, -.62, .26, .20);
+  ctx.restore();
 }
 
 function showMessages(messages, roomId) {
@@ -123,6 +201,17 @@ async function loadRooms() {
   else if (rooms.length && !selected) select.value = rooms[0].id;
 }
 
+function remainingSeconds(next, now) {
+  if (!next.countdown_ends_at) return null;
+  const serverNow = (next.server_time || Date.now() / 1000) + (now - receivedAt) / 1000;
+  return Math.max(0, next.countdown_ends_at - serverNow);
+}
+
+function countdownLabel(next) {
+  const remaining = remainingSeconds(next, performance.now());
+  return remaining == null ? "" : ` · старт через ${Math.ceil(remaining)} с`;
+}
+
 async function pollState() {
   if (polling) return;
   polling = true;
@@ -141,10 +230,7 @@ async function pollState() {
     state = next;
     receivedAt = performance.now();
     showMessages(next.messages, roomId);
-    const countdown = next.countdown_ends_at
-      ? ` · старт через ${Math.max(0, Math.ceil(next.countdown_ends_at - Date.now() / 1000))} с`
-      : "";
-    statusLabel.textContent = `${next.status} · танков: ${next.tanks_alive}${countdown}`;
+    statusLabel.textContent = `${next.status} · танков: ${next.tanks_alive}${countdownLabel(next)}`;
     hint.textContent = next.status === "waiting"
       ? "Для регистрации отправьте в терминальном клиенте: «войти " + roomId + " Имя»."
       : next.status === "countdown"

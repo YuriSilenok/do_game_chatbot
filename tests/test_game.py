@@ -1,7 +1,7 @@
 import time
 import unittest
 
-from game import Bonus, COMMANDS, Game, MAP_TEMPLATE, Room
+from game import Bonus, COMMANDS, Game, MAP_HEIGHT, MAP_TEMPLATE, MAP_WIDTH, Room
 
 
 class GameTests(unittest.TestCase):
@@ -9,9 +9,37 @@ class GameTests(unittest.TestCase):
         self.game = Game()
         self.room = self.game.create_room("Тест")
 
+    def begin_round_with_bots(self, names=("Игрок",)):
+        """Быстрый старт раунда с ботами (как в игровом цикле)."""
+        self.room.registrations.extend(names)
+        self.game.start_round(self.room)
+        count = len(self.room.registrations)
+        for index in range(count, 10):
+            self.room.tanks.append(
+                type(self.room.tanks[0])(
+                    id=self.room.object_id("tank"),
+                    name=f"Бот {index - count + 1}",
+                    is_bot=True,
+                    x=index + 0.5,
+                    y=index + 0.5,
+                )
+            )
+
     def begin_round(self, names=("Игрок",)):
         self.room.registrations.extend(names)
         self.game.start_round(self.room)
+        player = self.room.tanks[0]
+        x, y = int(player.x), int(player.y)
+        for index in range(1, 10):
+            self.room.tanks.append(
+                type(player)(
+                    id=self.room.object_id("enemy"),
+                    name=f"Бот {index}",
+                    is_bot=True,
+                    x=x + index,
+                    y=y + index,
+                )
+            )
 
     def test_join_command_registers_in_correct_room(self):
         message = self.game.post_message(self.room, "Аня", " ВОЙТИ 1 Аня ")
@@ -36,24 +64,19 @@ class GameTests(unittest.TestCase):
             self.game.post_message(self.room, "Аня", "войти 2 Аня")
         self.assertEqual(self.room.registrations, [])
 
-    def test_room_limits_registrations_to_twenty(self):
-        for number in range(20):
+    def test_room_limits_registrations_to_ten(self):
+        for number in range(10):
             self.game.join(self.room, f"Игрок {number}")
-        with self.assertRaisesRegex(ValueError, "20 игроков"):
-            self.game.join(self.room, "Двадцать первый")
+        with self.assertRaisesRegex(ValueError, "10 игроков"):
+            self.game.join(self.room, "Одиннадцатый")
 
-    def test_all_twenty_spawns_have_no_direct_visibility(self):
-        self.begin_round()
-        self.assertEqual(len(self.room.tanks), 20)
-        points = [(int(tank.x), int(tank.y)) for tank in self.room.tanks]
-        self.assertEqual(len(set(points)), 20)
-        self.assertTrue(
-            all(
-                not self.game._line_of_sight(self.room, first, second)
-                for index, first in enumerate(points)
-                for second in points[index + 1:]
-            )
-        )
+    def test_round_starts_only_registered_tanks_no_bots(self):
+        self.game.join(self.room, "Аня")
+        self.room.countdown_ends_at = time.time() - 1
+        self.game.tick()
+        self.assertEqual(self.room.phase, "round")
+        self.assertEqual([tank.name for tank in self.room.tanks], ["Аня"])
+        self.assertTrue(all(not tank.is_bot for tank in self.room.tanks))
 
     def test_only_registered_tank_receives_command(self):
         self.begin_round()
@@ -83,14 +106,14 @@ class GameTests(unittest.TestCase):
         self.assertTrue(player.is_bot)
 
     def test_bots_send_commands_as_chat_messages(self):
-        self.begin_round()
+        self.begin_round_with_bots()
         now = time.monotonic()
         for tank in self.room.tanks:
             if tank.is_bot:
                 tank.next_bot_command_at = now - 1
         self.game.tick(now)
         bot_messages = [message for message in self.room.messages if message["sender"].startswith("Бот ")]
-        self.assertEqual(len(bot_messages), 19)
+        self.assertEqual(len(bot_messages), 9)
         self.assertTrue(all(message["is_command"] for message in bot_messages))
 
     def test_bonuses_apply_tank_upgrade_shield_and_freeze(self):
@@ -107,9 +130,25 @@ class GameTests(unittest.TestCase):
         self.assertGreater(player.shield_until, time.monotonic())
         self.assertGreater(enemy.frozen_until, time.monotonic())
 
+    def test_countdown_posts_messages_to_chat_until_start(self):
+        self.game.join(self.room, "Аня")
+        self.assertIn(
+            "Раунд начнётся через 15 с",
+            [message["text"] for message in self.room.messages if message["sender"] == "Комната"],
+        )
+        self.room.countdown_ends_at = time.time() + 5
+        self.room.next_countdown_message_at = None
+        self.game.tick()
+        self.assertIn(
+            "Старт через 5 с",
+            [message["text"] for message in self.room.messages if message["sender"] == "Комната"],
+        )
+
     def test_map_template_matches_documented_size(self):
+        self.assertEqual(MAP_WIDTH, 26)
+        self.assertEqual(MAP_HEIGHT, 13)
         self.assertEqual(len(MAP_TEMPLATE), 13)
-        self.assertTrue(all(len(row) == 13 for row in MAP_TEMPLATE))
+        self.assertTrue(all(len(row) == 26 for row in MAP_TEMPLATE))
         self.assertEqual(COMMANDS, {"вверх", "вниз", "влево", "вправо", "выстрел"})
 
 

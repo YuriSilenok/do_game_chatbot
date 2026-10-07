@@ -45,3 +45,4 @@ document.querySelector("#create-room").addEventListener("submit", async event =>
 });
 
 refresh().catch(error => { errorLabel.textContent = error.message; });
+setInterval(() => refresh().catch(error => { errorLabel.textContent = error.message; }), 2000);

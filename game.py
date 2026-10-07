@@ -1,4 +1,5 @@
 import asyncio
+import math
 import random
 import time
 from collections import deque
@@ -7,20 +8,23 @@ from typing import Literal
 
 
 MAP_TEMPLATE = [
-    [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
-    [2, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 2],
-    [2, 0, 1, 1, 0, 2, 0, 2, 0, 1, 1, 0, 2],
-    [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
-    [2, 1, 0, 2, 0, 4, 4, 4, 0, 2, 0, 1, 2],
-    [2, 0, 0, 0, 0, 4, 3, 4, 0, 0, 0, 0, 2],
-    [2, 0, 2, 0, 0, 4, 3, 4, 0, 0, 2, 0, 2],
-    [2, 0, 0, 0, 0, 4, 4, 4, 0, 0, 0, 0, 2],
-    [2, 1, 0, 2, 0, 0, 0, 0, 0, 2, 0, 1, 2],
-    [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
-    [2, 0, 1, 1, 0, 2, 0, 2, 0, 1, 1, 0, 2],
-    [2, 0, 0, 1, 0, 0, 5, 0, 0, 1, 0, 0, 2],
-    [2, 2, 2, 2, 2, 2, 6, 2, 2, 2, 2, 2, 2],
+    [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    [2, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 2],
+    [2, 0, 1, 1, 0, 2, 0, 2, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 2, 0, 2, 0, 1, 1, 0, 2],
+    [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+    [2, 1, 0, 2, 0, 4, 4, 4, 0, 2, 0, 1, 0, 0, 1, 0, 2, 0, 4, 4, 4, 0, 2, 0, 1, 2],
+    [2, 0, 0, 0, 0, 4, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 3, 4, 0, 0, 0, 0, 2],
+    [2, 0, 2, 0, 0, 4, 3, 4, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 4, 3, 4, 0, 0, 2, 0, 2],
+    [2, 0, 0, 0, 0, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 4, 0, 0, 0, 0, 2],
+    [2, 1, 0, 2, 0, 4, 4, 4, 0, 2, 0, 1, 0, 0, 1, 0, 2, 0, 4, 4, 4, 0, 2, 0, 1, 2],
+    [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+    [2, 0, 1, 1, 0, 2, 0, 2, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 2, 0, 2, 0, 1, 1, 0, 2],
+    [2, 0, 0, 1, 0, 0, 5, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 5, 0, 0, 1, 0, 0, 2],
+    [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 6, 6, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
 ]
+
+MAP_WIDTH = len(MAP_TEMPLATE[0])
+MAP_HEIGHT = len(MAP_TEMPLATE)
 
 COMMANDS = {"вверх", "вниз", "влево", "вправо", "выстрел"}
 DIRECTIONS = {
@@ -81,6 +85,7 @@ class Room:
     phase: Literal["waiting", "countdown", "round"] = "waiting"
     registrations: list[str] = field(default_factory=list)
     countdown_ends_at: float | None = None
+    next_countdown_message_at: int | None = None
     tiles: list[list[int]] = field(default_factory=list)
     brick_hp: dict[tuple[int, int], int] = field(default_factory=dict)
     tanks: list[Tank] = field(default_factory=list)
@@ -124,6 +129,7 @@ class Game:
         }
 
     def join(self, room: Room, name: str) -> None:
+        # Первый игрок переводит комнату в ожидание старта.
         name = name.strip()
         if not name or len(name) > 40:
             raise ValueError("Имя должно содержать от 1 до 40 символов.")
@@ -131,12 +137,14 @@ class Game:
             raise ValueError("Раунд уже идёт. Регистрация откроется после его завершения.")
         if any(player.casefold() == name.casefold() for player in room.registrations):
             raise ValueError("Это имя уже зарегистрировано в комнате.")
-        if len(room.registrations) >= 20:
-            raise ValueError("В комнате уже зарегистрированы 20 игроков.")
+        if len(room.registrations) >= 10:
+            raise ValueError("В комнате уже зарегистрированы 10 игроков.")
         room.registrations.append(name)
         if room.phase == "waiting":
             room.phase = "countdown"
             room.countdown_ends_at = time.time() + COUNTDOWN_SECONDS
+            room.next_countdown_message_at = COUNTDOWN_SECONDS
+            self.post_message(room, "Комната", f"Раунд начнётся через {COUNTDOWN_SECONDS} с")
         room.updated_at = time.time()
 
     def post_message(self, room: Room, sender: str, text: str, *, is_bot: bool = False) -> dict:
@@ -151,7 +159,8 @@ class Game:
         if len(join_match) == 3 and join_match[0].casefold() == "войти":
             if join_match[1] != room.id:
                 raise ValueError("Номер комнаты в команде не совпадает.")
-            self.join(room, join_match[2])
+            if room.phase != "round":
+                self.join(room, join_match[2])
 
         tank = next(
             (
@@ -184,6 +193,20 @@ class Game:
         room.updated_at = time.time()
         return message
 
+    def post_game_message(self, room: Room, text: str) -> dict:
+        """Служебное сообщение чата (например, «Старт! Раунд начался.»)."""
+        message = {
+            "id": room.next_message_id,
+            "sender": "Комната",
+            "text": text,
+            "is_command": False,
+            "timestamp": time.time(),
+        }
+        room.next_message_id += 1
+        room.messages.append(message)
+        room.updated_at = time.time()
+        return message
+
     def _line_of_sight(self, room: Room, first: tuple[int, int], second: tuple[int, int]) -> bool:
         x1, y1 = first
         x2, y2 = second
@@ -206,14 +229,14 @@ class Game:
             for x, tile in enumerate(row)
             if tile in (0, 4)
         ]
-        random.Random(42).shuffle(available)
+        random.shuffle(available)
         selected: list[tuple[int, int]] = []
         for candidate in available:
             if all(not self._line_of_sight(room, candidate, point) for point in selected):
                 selected.append(candidate)
-                if len(selected) == 20:
+                if len(selected) == 10:
                     return selected
-        raise RuntimeError("На карте недостаточно безопасных точек появления для 20 танков.")
+        raise RuntimeError("На карте недостаточно безопасных точек появления для 10 танков.")
 
     def start_round(self, room: Room) -> None:
         room.tiles = [row.copy() for row in MAP_TEMPLATE]
@@ -225,19 +248,21 @@ class Game:
         }
         room.bonuses = []
         room.tanks = []
+        player_count = min(len(room.registrations), 10)
         for index, (x, y) in enumerate(self._spawn_points(room)):
-            is_bot = index >= len(room.registrations)
+            if index >= player_count:
+                break
             tank = Tank(
                 id=room.object_id("tank"),
-                name=room.registrations[index] if not is_bot else f"Бот {index - len(room.registrations) + 1}",
-                is_bot=is_bot,
+                name=room.registrations[index],
+                is_bot=False,
                 x=x + 0.5,
                 y=y + 0.5,
-                next_bot_command_at=time.monotonic() + random.uniform(0.2, 1.0),
             )
             room.tanks.append(tank)
         room.phase = "round"
         room.countdown_ends_at = None
+        room.next_countdown_message_at = None
         room.updated_at = time.time()
 
     def fire(self, room: Room, tank: Tank) -> None:
@@ -257,9 +282,9 @@ class Game:
         radius = 0.29
         for cx in (int(x - radius), int(x + radius)):
             for cy in (int(y - radius), int(y + radius)):
-                if cy < 0 or cy >= 13 or cx < 0 or cx >= 13:
+                if cy < 0 or cy >= MAP_HEIGHT or cx < 0 or cx >= MAP_WIDTH:
                     return False
-                if room.tiles[cy][cx] in (1, 2, 3, 6):
+                if room.tiles[cy][cx] in (1, 2, 6):
                     return False
         for other in room.tanks:
             if other is not tank and other.alive and abs(other.x - x) < 0.58 and abs(other.y - y) < 0.58:
@@ -300,7 +325,7 @@ class Game:
                     shell.x += dx * distance / steps
                     shell.y += dy * distance / steps
                     cx, cy = int(shell.x), int(shell.y)
-                    if not (0 <= cx < 13 and 0 <= cy < 13):
+                    if not (0 <= cx < MAP_WIDTH and 0 <= cy < MAP_HEIGHT):
                         alive = False
                         break
                     tile = room.tiles[cy][cx]
@@ -387,12 +412,13 @@ class Game:
             for direction, (dx, dy) in DIRECTIONS.items():
                 point = (x + dx, y + dy)
                 px, py = point
-                if point in visited or not (0 <= px < 13 and 0 <= py < 13):
+                if point in visited or not (0 <= px < MAP_WIDTH and 0 <= py < MAP_HEIGHT):
                     continue
                 if room.tiles[py][px] in (1, 2, 3, 6):
                     continue
                 visited.add(point)
                 queue.append((point, first_direction or direction))
+        # Бот без полного пути — наугад.
         return random.choice(tuple(DIRECTIONS))
 
     def tick(self, now: float | None = None) -> None:
@@ -402,6 +428,17 @@ class Game:
             if room.phase == "countdown":
                 if room.countdown_ends_at is not None and wall_now >= room.countdown_ends_at:
                     self.start_round(room)
+                    self.post_game_message(room, "Старт! Раунд начался.")
+                    continue
+                remaining = math.ceil(room.countdown_ends_at - wall_now) if room.countdown_ends_at is not None else 0
+                if room.next_countdown_message_at is None:
+                    room.next_countdown_message_at = 0
+                if remaining > 0 and remaining != room.next_countdown_message_at:
+                    if remaining in (3, 2, 1):
+                        self.post_message(room, "Комната", f"Старт через {remaining} с")
+                    elif remaining == 5:
+                        self.post_message(room, "Комната", "Старт через 5 с")
+                    room.next_countdown_message_at = remaining
                 continue
             if room.phase != "round":
                 continue
@@ -415,7 +452,9 @@ class Game:
                     tank.is_bot = True
                     tank.next_bot_command_at = now
                 if tank.is_bot and now >= tank.next_bot_command_at:
-                    self.post_message(room, tank.name, self._bot_command(room, tank), is_bot=True)
+                    command = self._bot_command(room, tank)
+                    self.post_message(room, tank.name, command, is_bot=True)
+                    # Движение бота происходит игровым циклом, команда — только в чат.
                     tank.next_bot_command_at = now + BOT_COMMAND_SECONDS
 
             self._move_tanks(room, TICK_SECONDS)
@@ -425,6 +464,7 @@ class Game:
                 room.phase = "waiting"
                 room.registrations.clear()
                 room.countdown_ends_at = None
+                room.next_countdown_message_at = None
                 room.tanks.clear()
                 room.bonuses.clear()
             room.updated_at = wall_now
@@ -433,7 +473,7 @@ class Game:
         tiles = room.tiles or MAP_TEMPLATE
         return {
             **self.room_summary(room),
-            "map": {"width": 13, "height": 13, "tiles": tiles},
+            "map": {"width": MAP_WIDTH, "height": MAP_HEIGHT, "tiles": tiles},
             "tanks": [
                 {
                     "id": tank.id,

@@ -6,7 +6,7 @@ h1 { margin: 0; font-size: 1.35rem; }
 a { color: #8bd3ed; }
 main { display: flex; gap: 1rem; padding: 1rem; height: calc(100vh - 4.2rem); }
 .arena { min-width: 0; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-#board { width: min(100%, calc(100vh - 8rem)); aspect-ratio: 1; image-rendering: pixelated; background: #080d10; }
+#board { width: min(100%, 100%); aspect-ratio: 2/1; image-rendering: pixelated; background: #080d10; }
 #hint { text-align: center; color: #bac7ce; }
 .chat-panel { flex: 0 0 min(33vw, 440px); display: flex; flex-direction: column; min-width: 270px; background: #202c35; padding: .8rem; border-radius: .5rem; }
 .chat-panel h2 { margin: 0 0 .5rem; }
