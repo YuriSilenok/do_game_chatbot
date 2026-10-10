@@ -22,7 +22,7 @@ from collections import deque
 import aiohttp
 
 
-BASE_URL = "http://127.0.0.1:8080"
+BASE_URL = "http://0.0.0.0:8080"
 ROOM_ID = "1"
 BOT_NAME = "Бот-Разведчик"
 POLL_INTERVAL = 0.15
