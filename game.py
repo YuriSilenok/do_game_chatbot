@@ -35,14 +35,16 @@ DIRECTIONS = {
     "вправо": (1, 0),
 }
 TILE_SIZE = 32
-# Быстрый такт бота: ~6-7 решений в секунду.
+
+# Ровно 2 действия в секунду на бота (шаг, поворот+шаг или выстрел).
 BOT_COMMAND_SECONDS = 0.5
+
 PLAYER_IDLE_SECONDS = 30
 STATE_LONGPOLL_SECONDS = 25.0
 SHELL_EVENT_SECONDS = 0.05
 BONUS_TYPES = ("звезда", "шлем", "часы")
 
-# Ровно 5 ботов в комнате, респавн через 5 секунд.
+# Ровно 5 «настоящих» ботов в комнате. Респавн через 5 секунд.
 BOT_TARGET_COUNT = 5
 BOT_RESPAWN_SECONDS = 5.0
 
@@ -84,6 +86,7 @@ class Tank:
     frozen_until: float = 0
     last_command_at: float = field(default_factory=time.monotonic)
     next_bot_command_at: float = 0
+    # True — бот создан сервером; False — игрок, ставший ботом по простою.
     initially_bot: bool = False
     respawn_at: float = 0
 
@@ -280,7 +283,7 @@ class Game:
         return room.spawn_points
 
     # ------------------------------------------------------------------
-    # Боты: ровно BOT_TARGET_COUNT, респавн через BOT_RESPAWN_SECONDS
+    # Боты: ровно BOT_TARGET_COUNT «настоящих», респавн через 5 с
     # ------------------------------------------------------------------
     def _free_spawn_cells(self, room: Room) -> list[tuple[int, int]]:
         used_cells = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
@@ -328,8 +331,23 @@ class Game:
         return tank
 
     def _ensure_bot_count(self, room: Room) -> None:
-        alive_bots = sum(1 for t in room.tanks if t.alive and t.is_bot)
-        need = BOT_TARGET_COUNT - alive_bots
+        """
+        Держит ровно BOT_TARGET_COUNT «настоящих» ботов.
+        Считает:
+          * живых ботов (alive=True, is_bot=True, initially_bot=True);
+          * мёртвых, ожидающих респавн (respawn_at > 0).
+        «Уснувших» игроков (is_bot=True, initially_bot=False) НЕ считает.
+        """
+        alive_bots = 0
+        pending = 0
+        for t in room.tanks:
+            if not t.is_bot or not t.initially_bot:
+                continue
+            if t.alive:
+                alive_bots += 1
+            elif t.respawn_at > 0:
+                pending += 1
+        need = BOT_TARGET_COUNT - alive_bots - pending
         for _ in range(need):
             if self._add_bot(room) is None:
                 break
@@ -362,6 +380,7 @@ class Game:
     def start_round(self, room: Room) -> None:
         self._ensure_map(room)
         room.bonuses = []
+        # Удаляем всех ботов — создадим заново ровно BOT_TARGET_COUNT.
         room.tanks = [t for t in room.tanks if not t.is_bot and t.alive]
         room.next_bot_index = 1
         self._ensure_bot_count(room)
@@ -430,11 +449,7 @@ class Game:
             self.fire(room, tank)
 
     def _bot_step(self, room: Room, tank: Tank, direction: str) -> None:
-        """
-        Для БОТОВ: поворот и шаг за ОДИН такт.
-        Если направление не совпадает — сначала поворот, затем сразу шаг.
-        Это устраняет потерю такта при смене направления.
-        """
+        """Для БОТОВ: поворот + шаг за один такт."""
         if tank.direction != direction:
             tank.direction = direction
         self._move_tank_one_tile(room, tank, direction)
@@ -500,7 +515,7 @@ class Game:
                     owner = next((t for t in room.tanks if t.id == s.owner_id), None)
                     if owner is not None and owner.name.casefold() in registered_names:
                         owner.kills += 1
-                    if target.is_bot:
+                    if target.is_bot and target.initially_bot:
                         target.respawn_at = time.monotonic() + BOT_RESPAWN_SECONDS
                     if random.random() < 0.3:
                         room.bonuses.append(Bonus(
@@ -549,7 +564,7 @@ class Game:
         room.bonuses = kept
 
     # ------------------------------------------------------------------
-    # Логика ботов: цель — лидер по убийствам, стрельба ТОЛЬКО по линии
+    # Цель бота — лидер по убийствам; стрельба только по линии
     # ------------------------------------------------------------------
     def _bot_target(self, room: Room, tank: Tank) -> Tank | None:
         """Живой игрок с максимумом убийств; при равенстве — ближайший."""
@@ -650,13 +665,10 @@ class Game:
                 cmd = self._bot_command(room, tank)
                 if cmd == "выстрел":
                     self.fire(room, tank)
-                    # Выстрел не требует полного такта — ускоряем реакцию.
-                    tank.next_bot_command_at = now + BOT_COMMAND_SECONDS * 0.5
                 elif cmd in DIRECTIONS:
                     self._bot_step(room, tank, cmd)
-                    tank.next_bot_command_at = now + BOT_COMMAND_SECONDS
-                else:
-                    tank.next_bot_command_at = now + BOT_COMMAND_SECONDS
+                # Ровно 2 действия/с: единый интервал для шага и выстрела.
+                tank.next_bot_command_at = now + BOT_COMMAND_SECONDS
         self._collect_bonuses(room)
         room.updated_at = wall
 
