@@ -2,16 +2,12 @@ const board = document.querySelector("#board");
 const ctx = board.getContext("2d");
 const statusLabel = document.querySelector("#room-status");
 const hint = document.querySelector("#hint");
-const chat = document.querySelector("#chat");
 const killsList = document.querySelector("#kills-list");
 let state = null;
 let polling = false;
 let stateRequest = null;
 let stateVersion = null;
 
-// Соответствие русских названий цветов (как их отдаёт сервер)
-// и CSS-цветов для canvas. Canvas понимает только CSS-цвета,
-// поэтому «красный» нужно превратить в «#e6194b» и т.д.
 const TANK_COLOR_CSS = {
   "красный":    "#e6194b",
   "зелёный":    "#3cb44b",
@@ -33,6 +29,37 @@ function tileColor(type) {
   return ({ 1: "#b76537", 2: "#87939a", 3: "#2474a1", 4: "#397447", 5: "#a5e7ef", 6: "#e3b837" })[type] || "#111820";
 }
 
+function drawTile(type, x, y) {
+  ctx.fillStyle = type === 4 ? "rgba(36,116,161,.85)" : tileColor(type);
+  ctx.fillRect(x, y, 1, 1);
+  if (type === 1) {
+    ctx.fillStyle = "#b76537";
+    ctx.fillRect(x + .06, y + .06, .88, .88);
+    ctx.fillStyle = "#8d4b26";
+    for (const [ox, oy, w, h] of [[.06, .06, .88, .26], [.06, .68, .88, .26], [.68, .06, .26, .88]]) {
+      ctx.fillRect(x + ox, y + oy, w, h);
+    }
+    ctx.strokeStyle = "#754225";
+    ctx.lineWidth = .045;
+    ctx.strokeRect(x + .07, y + .07, .86, .86);
+  } else if (type === 2) {
+    ctx.fillStyle = "#c7d3da";
+    ctx.fillRect(x + .12, y + .12, .76, .76);
+    ctx.fillStyle = "#9aa8b0";
+    ctx.fillRect(x + .04, y + .04, .92, .92);
+    ctx.strokeStyle = "#78888f";
+    ctx.lineWidth = .05;
+    ctx.strokeRect(x + .04, y + .04, .92, .92);
+  } else if (type === 5) {
+    ctx.fillStyle = "#b8edf4";
+    for (const [dx, dy] of [[.12, .18], [.2, .48], [.18, .76], [.7, .2], [.68, .52], [.74, .78]]) {
+      ctx.beginPath();
+      ctx.arc(x + dx, y + dy, .11, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
 function draw() {
   if (!state) {
     ctx.clearRect(0, 0, board.width, board.height);
@@ -40,50 +67,31 @@ function draw() {
   }
   const mapWidth = state.map?.width || 26;
   const mapHeight = state.map?.height || 13;
-  const canvasLeft = document.querySelector(".arena > #board") || board;
-  const size = Math.min(canvasLeft.clientWidth || 800, canvasLeft.clientHeight || 600);
+  const size = Math.min(board.clientWidth || 800, board.clientHeight || 600);
   if (!size) return;
-  const maxByHeight = (canvasLeft.clientHeight || 600) / mapHeight * mapWidth;
-  const pixels = Math.min(Math.round(size * (window.devicePixelRatio || 1)), Math.round((canvasLeft.clientWidth || 800) * (window.devicePixelRatio || 1)), Math.round(maxByHeight * (window.devicePixelRatio || 1)));
-  if (board.width !== pixels || board.height !== Math.round(pixels / mapWidth * mapHeight)) {
+  const maxByHeight = (board.clientHeight || 600) / mapHeight * mapWidth;
+  const dpr = window.devicePixelRatio || 1;
+  const pixels = Math.min(
+    Math.round(size * dpr),
+    Math.round((board.clientWidth || 800) * dpr),
+    Math.round(maxByHeight * dpr),
+  );
+  const targetHeight = Math.round(pixels / mapWidth * mapHeight);
+  if (board.width !== pixels || board.height !== targetHeight) {
     board.width = pixels;
-    board.height = Math.round(pixels / mapWidth * mapHeight);
+    board.height = targetHeight;
   }
   const scale = pixels / mapWidth;
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
   ctx.fillStyle = "#111820";
   ctx.fillRect(0, 0, mapWidth, mapHeight);
 
-  for (const block of state.blocks) {
-    ctx.fillStyle = block.type === 4 ? "rgba(36,116,161,.85)" : tileColor(block.type);
-    ctx.fillRect(block.x, block.y, 1, 1);
-    if (block.type === 1) {
-      ctx.fillStyle = "#b76537";
-      ctx.fillRect(block.x + .06, block.y + .06, .88, .88);
-      ctx.fillStyle = "#8d4b26";
-      for (const [ox, oy, w, h] of [[.06, .06, .88, .26], [.06, .68, .88, .26], [.68, .06, .26, .88]]) {
-        ctx.fillRect(block.x + ox, block.y + oy, w, h);
-      }
-      ctx.strokeStyle = "#754225";
-      ctx.lineWidth = .045;
-      ctx.strokeRect(block.x + .07, block.y + .07, .86, .86);
-    }
-    if (block.type === 2) {
-      ctx.fillStyle = "#c7d3da";
-      ctx.fillRect(block.x + .12, block.y + .12, .76, .76);
-      ctx.fillStyle = "#9aa8b0";
-      ctx.fillRect(block.x + .04, block.y + .04, .92, .92);
-      ctx.strokeStyle = "#78888f";
-      ctx.lineWidth = .05;
-      ctx.strokeRect(block.x + .04, block.y + .04, .92, .92);
-    }
-    if (block.type === 5) {
-      ctx.fillStyle = "#b8edf4";
-      for (const [dx, dy] of [[.12, .18], [.2, .48], [.18, .76], [.7, .2], [.68, .52], [.74, .78]]) {
-        ctx.beginPath();
-        ctx.arc(block.x + dx, block.y + dy, .11, 0, Math.PI * 2);
-        ctx.fill();
-      }
+  const tiles = state.map.tiles;
+  for (let y = 0; y < mapHeight; y++) {
+    const row = tiles[y];
+    for (let x = 0; x < mapWidth; x++) {
+      const type = row[x];
+      if (type !== 0) drawTile(type, x, y);
     }
   }
   for (const bonus of state.bonuses) {
@@ -161,20 +169,6 @@ function drawTank(x, y, direction, isBot, shielded, color) {
   ctx.restore();
 }
 
-function showMessages(messages) {
-  const latest = Number(chat.dataset.latest || 0);
-  for (const message of messages) {
-    if (message.id <= latest) continue;
-    const item = document.createElement("li");
-    if (message.is_command) item.className = "command";
-    item.textContent = `${message.sender}: ${message.text}`;
-    chat.append(item);
-  }
-  if (messages.length) chat.dataset.latest = String(messages[messages.length - 1].id);
-  while (chat.children.length > 200) chat.firstElementChild.remove();
-  chat.scrollTop = chat.scrollHeight;
-}
-
 function showKills(kills) {
   if (!killsList) return;
   const entries = Object.entries(kills || {});
@@ -208,10 +202,9 @@ async function pollState() {
     state = next;
     stateVersion = next.state_version;
     draw();
-    showMessages(next.messages);
     showKills(next.kills);
     statusLabel.textContent = `Раунд идёт · танков: ${next.tanks_alive}`;
-    hint.textContent = "Игроки могут подключаться в любой момент. Команды доступны через терминальный клиент.";
+    hint.textContent = "Команды отправляются из терминального клиента.";
   } catch (error) {
     if (error.name !== "AbortError") {
       statusLabel.textContent = error.message;

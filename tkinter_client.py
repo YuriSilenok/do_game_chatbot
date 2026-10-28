@@ -39,11 +39,9 @@ class TankClient:
         self.join_button = tk.Button(frame, text="Подключиться", command=self.join)
         self.join_button.grid(row=1, column=1, pady=(4, 12))
 
-        tk.Label(
-            frame,
-            text="Управление: стрелки и пробел",
-            anchor="w",
-        ).grid(row=2, column=0, columnspan=2, sticky="ew")
+        tk.Label(frame, text="Управление: стрелки и пробел", anchor="w").grid(
+            row=2, column=0, columnspan=2, sticky="ew"
+        )
         self.status = tk.StringVar(value="Введите имя и подключитесь к общей комнате.")
         tk.Label(frame, textvariable=self.status, anchor="w", wraplength=330).grid(
             row=3, column=0, columnspan=2, pady=(10, 0), sticky="ew"
@@ -55,7 +53,7 @@ class TankClient:
 
         self.worker = threading.Thread(target=self.request_worker, daemon=True)
         self.worker.start()
-        self.root.after(100, self.check_results)
+        self.root.after(150, self.check_results)
 
     def join(self):
         name = self.name_entry.get().strip()
@@ -137,7 +135,7 @@ class TankClient:
         except queue.Empty:
             pass
         if not self.stop_worker.is_set():
-            self.root.after(100, self.check_results)
+            self.root.after(150, self.check_results)
 
     def watch_tank(self, tank_id, stop_event):
         state_version = None
@@ -167,7 +165,7 @@ class TankClient:
         if key in self.pressed_keys:
             return "break"
         self.pressed_keys.add(key)
-        self.request_queue.put(("command", {"sender": self.player_name, "text": command}))
+        self.request_queue.put(("command", {"sender": self.player_name, "command": command}))
         return "break"
 
     def on_key_release(self, event):

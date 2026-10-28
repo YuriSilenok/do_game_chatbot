@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import secrets
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -23,9 +23,9 @@ class JoinRequest(BaseModel):
     name: str = Field(min_length=1, max_length=40)
 
 
-class MessageRequest(BaseModel):
+class CommandRequest(BaseModel):
     sender: str = Field(min_length=1, max_length=40)
-    text: str = Field(min_length=1, max_length=500)
+    command: str = Field(min_length=1, max_length=20)
 
 
 app = FastAPI(title="Танковый чат")
@@ -85,32 +85,27 @@ async def join_room(payload: JoinRequest):
     }
 
 
-@app.post("/api/messages", status_code=status.HTTP_201_CREATED)
-async def send_message(payload: MessageRequest):
-    room = game.room
-    try:
-        game.process_room_events(room)
-        game.post_message(room, payload.sender, payload.text)
-        game.process_room_events(room)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    await publish_room_event()
-    # Ничего не возвращаем — клиенту не нужен ответ.
-    return Response(status_code=status.HTTP_201_CREATED)
-
-
 @app.post("/api/commands", status_code=status.HTTP_201_CREATED)
-async def send_command(payload: MessageRequest):
+async def send_command(payload: CommandRequest):
     room = game.room
-    normalized = payload.text.strip().casefold()
+    normalized = payload.command.strip().casefold()
     if normalized not in {"вверх", "вниз", "влево", "вправо", "выстрел"}:
         raise HTTPException(status_code=422, detail="Неизвестная команда.")
-    try:
-        game.process_room_events(room)
-        game.post_message(room, payload.sender, normalized)
-        game.process_room_events(room)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    sender = payload.sender.strip().casefold()
+    tank = next(
+        (t for t in room.tanks if t.alive and t.name.casefold() == sender),
+        None,
+    )
+    if tank is None:
+        raise HTTPException(status_code=409, detail="Танк не найден или уничтожен.")
+
+    # Если танк управлялся ботом — «будим» игрока.
+    tank.is_bot = False
+    tank.last_command_at = time.monotonic()
+    tank.next_bot_command_at = 0
+    game.apply_command(room, tank, normalized)
+
     await publish_room_event()
     return Response(status_code=status.HTTP_201_CREATED)
 

@@ -40,13 +40,11 @@ PLAYER_IDLE_SECONDS = 30
 SHELL_EVENT_SECONDS = 0.05
 BONUS_TYPES = ("звезда", "шлем", "часы")
 
-# Расписание волн ботов: на старте 1, через 30 с — 2, через 60 с — 3,
-# и так до 7 на 180-й секунде. После этого волн больше нет.
+# Расписание размеров волн ботов.
 BOT_WAVE_SIZES = [1, 2, 3, 4, 5, 6, 7]
-BOT_WAVE_INTERVAL_SECONDS = 30
+# Интервал между волнами — динамический: max(1, BOT_WAVE_BASE_INTERVAL - лучший_счёт)
+BOT_WAVE_BASE_INTERVAL = 30.0
 
-# Предопределённые цвета танков игроков (названия буквами).
-# Назначаются по порядку: первый вошедший — «красный», второй — «зелёный» и т.д.
 TANK_COLORS = [
     "красный",
     "зелёный",
@@ -59,9 +57,7 @@ TANK_COLORS = [
 ]
 BOT_COLOR = "серый"
 
-# Тайлы, блокирующие обзор и движение
 BLOCKING_TILES = {1, 2, 4, 6}
-# Проходимые тайлы: 0 — пусто, 3 — лёд, 5 — трава
 PASSABLE_TILES = {0, 3, 5}
 
 
@@ -114,19 +110,16 @@ class Room:
     brick_hp: dict[tuple[int, int], int] = field(default_factory=dict)
     tanks: list[Tank] = field(default_factory=list)
     bonuses: list[Bonus] = field(default_factory=list)
-    messages: deque[dict] = field(default_factory=lambda: deque(maxlen=200))
-    next_message_id: int = 1
     next_object_id: int = 1
     spawn_points: list[tuple[int, int]] = field(default_factory=list)
     state_version: int = 0
     last_simulated_at: float = field(default_factory=time.monotonic)
     updated_at: float = field(default_factory=time.time)
-    # Счётчик выданных цветов, чтобы назначать их строго по порядку.
     color_counter: int = 0
-    # Планирование волн ботов.
-    bot_wave_index: int = 0                 # индекс следующей волны (0..len(BOT_WAVE_SIZES)-1)
-    next_bot_wave_at: float | None = None   # wall-clock время следующей волны
-    next_bot_index: int = 1                 # следующий номер для имени бота
+    bot_wave_index: int = 0
+    # Wall-clock время запуска текущей волны (от него отсчитывается интервал).
+    bot_wave_started_at: float | None = None
+    next_bot_index: int = 1
 
     def object_id(self, prefix: str) -> str:
         result = f"{prefix}-{self.next_object_id}"
@@ -135,7 +128,7 @@ class Room:
 
 
 # ---------------------------------------------------------------------------
-# Логика бота (перенесена из bot.py)
+# Логика бота
 # ---------------------------------------------------------------------------
 def _tile_at(tiles: list[list[int]], x: int, y: int) -> int | None:
     if 0 <= y < len(tiles) and 0 <= x < len(tiles[0]):
@@ -146,7 +139,6 @@ def _tile_at(tiles: list[list[int]], x: int, y: int) -> int | None:
 def _line_of_sight(tiles: list[list[int]],
                    first: tuple[int, int],
                    second: tuple[int, int]) -> bool:
-    """Проверяет, что между двумя клетками нет блокирующих тайлов."""
     x1, y1 = first
     x2, y2 = second
     x_start, y_start = x1 + 0.5, y1 + 0.5
@@ -163,7 +155,6 @@ def _line_of_sight(tiles: list[list[int]],
 
 
 def _direction_between(src: tuple[int, int], dst: tuple[int, int]) -> str | None:
-    """Возвращает направление, если клетки стоят на одной линии."""
     dx = dst[0] - src[0]
     dy = dst[1] - src[1]
     if dx == 0 and dy != 0:
@@ -177,10 +168,6 @@ def _bfs_next_step(tiles: list[list[int]],
                    start: tuple[int, int],
                    goals: set[tuple[int, int]],
                    blocked: set[tuple[int, int]]) -> str | None:
-    """
-    Ищет кратчайший путь от start до любой клетки из goals.
-    Возвращает первое направление шага или None, если пути нет.
-    """
     if start in goals:
         return None
 
@@ -212,14 +199,15 @@ class Game:
         self.room = Room(id="1", name="Общая")
         self.start_round(self.room)
 
+    # ------------------------------------------------------------------
+    # Сводки и вспомогательные
+    # ------------------------------------------------------------------
     def room_summary(self, room: Room) -> dict:
         return {
             "id": room.id,
             "name": room.name,
             "status": room.phase,
-            "players": len(room.registrations) if room.phase != "round" else sum(
-                not tank.is_bot and tank.alive for tank in room.tanks
-            ),
+            "players": sum(not tank.is_bot and tank.alive for tank in room.tanks),
             "tanks_alive": sum(tank.alive for tank in room.tanks),
         }
 
@@ -235,11 +223,6 @@ class Game:
         }
 
     def _next_color(self, room: Room) -> str:
-        """
-        Назначает цвет по порядку из TANK_COLORS.
-        Первый вошедший получает «красный», второй — «зелёный» и т.д.
-        После восьмого цвета нумерация идёт по кругу.
-        """
         color = TANK_COLORS[room.color_counter % len(TANK_COLORS)]
         room.color_counter += 1
         return color
@@ -270,65 +253,11 @@ class Game:
             color=self._next_color(room),
         )
         room.tanks.append(tank)
-
         room.updated_at = time.time()
 
-    def post_message(self, room: Room, sender: str, text: str, *, is_bot: bool = False) -> dict:
-        sender = sender.strip()
-        text = text.strip()
-        if not sender or len(sender) > 40:
-            raise ValueError("Имя отправителя должно содержать от 1 до 40 символов.")
-        if not text or len(text) > 500:
-            raise ValueError("Сообщение должно содержать от 1 до 500 символов.")
-
-        join_match = text.split(maxsplit=1)
-        if len(join_match) == 2 and join_match[0].casefold() == "войти":
-            self.join(room, join_match[1])
-
-        tank = next(
-            (
-                candidate
-                for candidate in room.tanks
-                if candidate.alive and candidate.is_bot == is_bot
-                and candidate.name.casefold() == sender.casefold()
-            ),
-            None,
-        )
-        normalized = text.strip().casefold()
-        highlighted = normalized in COMMANDS and tank is not None
-        if tank is not None and normalized in COMMANDS:
-            tank.last_command_at = time.monotonic()
-            if room.phase == "round":
-                self._apply_command(room, tank, normalized)
-
-        message = {
-            "id": room.next_message_id,
-            "sender": sender,
-            "text": text,
-            "is_command": highlighted,
-            "timestamp": time.time(),
-        }
-        room.next_message_id += 1
-        room.messages.append(message)
-        room.updated_at = time.time()
-        return message
-
-    def post_game_message(self, room: Room, text: str) -> dict:
-        """Служебное сообщение чата (например, «Старт! Раунд начался.»)."""
-        message = {
-            "id": room.next_message_id,
-            "sender": "Комната",
-            "text": text,
-            "is_command": False,
-            "timestamp": time.time(),
-        }
-        room.next_message_id += 1
-        room.messages.append(message)
-        room.updated_at = time.time()
-        return message
-
-    def _game_line_of_sight(self, room: Room, first: tuple[int, int], second: tuple[int, int]) -> bool:
-        """Внутренняя проверка видимости (используется для точек появления)."""
+    def _game_line_of_sight(self, room: Room,
+                            first: tuple[int, int],
+                            second: tuple[int, int]) -> bool:
         x1, y1 = first
         x2, y2 = second
         if room.tiles[y1][x1] == 4 or room.tiles[y2][x2] == 4:
@@ -369,14 +298,21 @@ class Game:
         return room.spawn_points
 
     # ------------------------------------------------------------------
-    # Боты: добавление волнами
+    # Боты: волны
     # ------------------------------------------------------------------
+    def _best_player_kills(self, room: Room) -> int:
+        registered = {name.casefold() for name in room.registrations}
+        best = 0
+        for tank in room.tanks:
+            if tank.name.casefold() in registered and tank.kills > best:
+                best = tank.kills
+        return best
+
+    def _bot_wave_interval(self, room: Room) -> float:
+        """Интервал до следующей волны: 30 - лучший_счёт, но не меньше 1 с."""
+        return max(1.0, BOT_WAVE_BASE_INTERVAL - self._best_player_kills(room))
+
     def _free_spawn_cells(self, room: Room) -> list[tuple[int, int]]:
-        """
-        Свободные клетки для появления нового танка.
-        Сначала — выделенные точки появления, затем — любые свободные
-        проходимые клетки (если выделенных не хватило).
-        """
         used_cells = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
         spawn_points = self._spawn_points(room)
         free = [p for p in spawn_points if p not in used_cells]
@@ -390,7 +326,6 @@ class Game:
         return fallback
 
     def _add_bot(self, room: Room) -> Tank | None:
-        """Добавляет одного бота на свободную точку появления."""
         free_points = self._free_spawn_cells(room)
         if not free_points:
             spawn_points = self._spawn_points(room)
@@ -418,7 +353,6 @@ class Game:
         return tank
 
     def _add_bot_wave(self, room: Room, count: int) -> int:
-        """Добавляет count ботов (или сколько поместится). Возвращает число добавленных."""
         added = 0
         for _ in range(count):
             if self._add_bot(room) is None:
@@ -426,34 +360,27 @@ class Game:
             added += 1
         return added
 
-    def _schedule_next_bot_wave(self, room: Room) -> None:
-        """Планирует следующую волну ботов или прекращает волны."""
-        if room.bot_wave_index >= len(BOT_WAVE_SIZES):
-            room.next_bot_wave_at = None
-            return
-        room.next_bot_wave_at = time.time() + BOT_WAVE_INTERVAL_SECONDS
-
     # ------------------------------------------------------------------
-    # Запуск/перезапуск раунда
+    # Раунд
     # ------------------------------------------------------------------
     def start_round(self, room: Room) -> None:
         self._ensure_map(room)
         room.bonuses = []
-
         room.tanks = [t for t in room.tanks if not t.is_bot and t.alive]
 
-        # Волны ботов: первая волна сразу, следующая — через 30 с.
         room.next_bot_index = 1
         room.bot_wave_index = 0
         self._add_bot_wave(room, BOT_WAVE_SIZES[room.bot_wave_index])
         room.bot_wave_index += 1
-        self._schedule_next_bot_wave(room)
+        room.bot_wave_started_at = (
+            time.time() if room.bot_wave_index < len(BOT_WAVE_SIZES) else None
+        )
 
-        # Сброс параметров танков к началу раунда
         for tank in room.tanks:
             tank.alive = True
             tank.direction = "вверх"
             tank.level = 0
+            tank.kills = 0
             tank.shell_limit = 1
             tank.shells.clear()
             tank.shield_until = 0
@@ -464,6 +391,9 @@ class Game:
         room.last_simulated_at = time.monotonic()
         room.updated_at = time.time()
 
+    # ------------------------------------------------------------------
+    # Команды
+    # ------------------------------------------------------------------
     def fire(self, room: Room, tank: Tank) -> None:
         if tank.alive and len(tank.shells) < tank.shell_limit:
             tank.shells.append(
@@ -491,7 +421,6 @@ class Game:
         return True
 
     def _move_tank_one_tile(self, room: Room, tank: Tank, direction: str) -> bool:
-        """Сдвигает танк ровно на одну клетку в заданном направлении."""
         dx, dy = DIRECTIONS[direction]
         nx = tank.x + dx
         ny = tank.y + dy
@@ -501,7 +430,7 @@ class Game:
         tank.y = ny
         return True
 
-    def _apply_command(self, room: Room, tank: Tank, command: str) -> None:
+    def apply_command(self, room: Room, tank: Tank, command: str) -> None:
         if not tank.alive or tank.frozen_until > time.monotonic():
             return
         if command in DIRECTIONS:
@@ -512,6 +441,9 @@ class Game:
         elif command == "выстрел":
             self.fire(room, tank)
 
+    # ------------------------------------------------------------------
+    # Симуляция снарядов / бонусов
+    # ------------------------------------------------------------------
     def _move_shells(self, room: Room, dt: float) -> None:
         shells = [shell for tank in room.tanks for shell in tank.shells]
         if not shells:
@@ -604,7 +536,6 @@ class Game:
         for tank in room.tanks:
             tank.shells[:] = [shell for shell in tank.shells if shell.id not in destroyed]
 
-        registered_names = {name.casefold() for name in room.registrations}
         dead_players = {
             tank.name.casefold()
             for tank in room.tanks
@@ -648,13 +579,8 @@ class Game:
                        tank: Tank,
                        my_cell: tuple[int, int],
                        blocked: set[tuple[int, int]]) -> str | None:
-        """
-        Если в одном из четырёх направлений по прямой виден кирпич (и путь до
-        него не перекрыт сталью/водой/бетоном и другими танками), бот
-        разворачивается в эту сторону и стреляет.
-        """
         tiles = room.tiles
-        best: tuple[int, str] | None = None  # (расстояние, направление)
+        best: tuple[int, str] | None = None
         for direction, (dx, dy) in DIRECTIONS.items():
             x, y = my_cell
             dist = 0
@@ -682,13 +608,6 @@ class Game:
         return None
 
     def _bot_command(self, room: Room, tank: Tank) -> str | None:
-        """
-        Логика бота:
-          1. Если видит живого противника — разворачивается и стреляет.
-          2. Иначе — если в каком-то направлении по прямой есть кирпич,
-             разворачивается к нему и стреляет.
-          3. Иначе — идёт (BFS) к клетке рядом с ближайшим противником.
-        """
         targets = [other for other in room.tanks if other.alive and other.id != tank.id]
         if not targets:
             return None
@@ -699,7 +618,6 @@ class Game:
 
         targets.sort(key=lambda other: (other.x - tank.x) ** 2 + (other.y - tank.y) ** 2)
 
-        # 1. Видим противника — стреляем в него.
         for enemy in targets:
             enemy_cell = (int(enemy.x), int(enemy.y))
             if _line_of_sight(tiles, my_cell, enemy_cell):
@@ -709,12 +627,10 @@ class Game:
                         return dir_name
                     return "выстрел"
 
-        # 2. Противника не видим — стреляем по кирпичам.
         brick_cmd = self._brick_command(room, tank, my_cell, blocked)
         if brick_cmd is not None:
             return brick_cmd
 
-        # 3. Иначе — идём к ближайшему противнику.
         for enemy in targets:
             enemy_cell = (int(enemy.x), int(enemy.y))
             goals: set[tuple[int, int]] = set()
@@ -731,14 +647,18 @@ class Game:
 
         return None
 
+    # ------------------------------------------------------------------
+    # Главный тик
+    # ------------------------------------------------------------------
     def next_room_event_delay(self, room: Room) -> float | None:
         monotonic_now = time.monotonic()
         wall_now = time.time()
         delays: list[float] = []
 
         if room.phase == "round":
-            if room.next_bot_wave_at is not None:
-                delays.append(max(0, room.next_bot_wave_at - wall_now))
+            if room.bot_wave_started_at is not None:
+                interval = self._bot_wave_interval(room)
+                delays.append(max(0.0, room.bot_wave_started_at + interval - wall_now))
             for tank in room.tanks:
                 if not tank.alive:
                     continue
@@ -766,17 +686,17 @@ class Game:
         if room.phase != "round":
             return
 
-        if room.next_bot_wave_at is not None and wall_now >= room.next_bot_wave_at:
-            if room.bot_wave_index < len(BOT_WAVE_SIZES):
-                size = BOT_WAVE_SIZES[room.bot_wave_index]
-                added = self._add_bot_wave(room, size)
-                if added:
-                    self.post_game_message(
-                        room,
-                        f"Подкрепление: +{added} бот(ов). Всего танков: {len(room.tanks)}.",
-                    )
-                room.bot_wave_index += 1
-            self._schedule_next_bot_wave(room)
+        # Планирование волн ботов — интервал зависит от лучшего счёта.
+        if room.bot_wave_started_at is not None:
+            interval = self._bot_wave_interval(room)
+            if wall_now >= room.bot_wave_started_at + interval:
+                if room.bot_wave_index < len(BOT_WAVE_SIZES):
+                    self._add_bot_wave(room, BOT_WAVE_SIZES[room.bot_wave_index])
+                    room.bot_wave_index += 1
+                if room.bot_wave_index < len(BOT_WAVE_SIZES):
+                    room.bot_wave_started_at = wall_now
+                else:
+                    room.bot_wave_started_at = None
 
         self._move_shells(room, elapsed)
         self._collect_bonuses(room)
@@ -792,11 +712,10 @@ class Game:
             if tank.is_bot and now >= tank.next_bot_command_at:
                 command = self._bot_command(room, tank)
                 if command is not None:
-                    self.post_message(room, tank.name, command, is_bot=True)
+                    self.apply_command(room, tank, command)
                 tank.next_bot_command_at = now + BOT_COMMAND_SECONDS
 
         self._collect_bonuses(room)
-
         room.updated_at = wall_now
 
     def room_state(self, room: Room) -> dict:
@@ -833,12 +752,6 @@ class Game:
                 for tank in room.tanks
                 for shell in tank.shells
             ],
-            "blocks": [
-                {"x": x, "y": y, "type": tile, "hp": room.brick_hp.get((x, y))}
-                for y, row in enumerate(tiles)
-                for x, tile in enumerate(row)
-                if tile != 0
-            ],
             "bonuses": [
                 {"id": bonus.id, "type": bonus.kind, "x": bonus.x, "y": bonus.y}
                 for bonus in room.bonuses
@@ -851,7 +764,6 @@ class Game:
                 ),
                 key=lambda item: -item[1],
             )),
-            "messages": list(room.messages),
             "server_time": time.time(),
         }
 
