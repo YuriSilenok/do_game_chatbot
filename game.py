@@ -41,9 +41,9 @@ STATE_LONGPOLL_SECONDS = 25.0
 SHELL_EVENT_SECONDS = 0.05
 BONUS_TYPES = ("звезда", "шлем", "часы")
 
-# Волны ботов: размер = 2 × живых игроков, интервал фиксирован.
-BOT_WAVE_INTERVAL_SECONDS = 30.0
-BOTS_PER_PLAYER = 2
+# Ровно столько ботов в комнате, респавн через BOT_RESPAWN_SECONDS.
+BOT_TARGET_COUNT = 5
+BOT_RESPAWN_SECONDS = 5.0
 
 TANK_COLORS = [
     "красный", "зелёный", "синий", "оранжевый",
@@ -84,6 +84,8 @@ class Tank:
     last_command_at: float = field(default_factory=time.monotonic)
     next_bot_command_at: float = 0
     initially_bot: bool = False
+    # Ботов не удаляем — они «мёртвые» лежат с этим моментом.
+    respawn_at: float = 0
 
 
 @dataclass
@@ -111,7 +113,6 @@ class Room:
     last_simulated_at: float = field(default_factory=time.monotonic)
     updated_at: float = field(default_factory=time.time)
     color_counter: int = 0
-    next_bot_wave_at: float | None = None
     next_bot_index: int = 1
 
     def object_id(self, prefix: str) -> str:
@@ -279,22 +280,8 @@ class Game:
         return room.spawn_points
 
     # ------------------------------------------------------------------
-    # Волны ботов: размер = 2 × живых игроков
+    # Боты: ровно BOT_TARGET_COUNT штук, респавн через BOT_RESPAWN_SECONDS
     # ------------------------------------------------------------------
-    def _alive_players(self, room: Room) -> int:
-        """Живые игроки (не боты) в комнате."""
-        registered = {name.casefold() for name in room.registrations}
-        return sum(
-            1 for t in room.tanks
-            if t.alive
-            and not t.is_bot
-            and t.name.casefold() in registered
-        )
-
-    def _next_wave_size(self, room: Room) -> int:
-        """Размер волны = 2 × живых игроков (0, если игроков нет)."""
-        return BOTS_PER_PLAYER * self._alive_players(room)
-
     def _free_spawn_cells(self, room: Room) -> list[tuple[int, int]]:
         used_cells = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
         spawn_points = self._spawn_points(room)
@@ -308,15 +295,18 @@ class Game:
                     fallback.append((x, y))
         return fallback
 
+    def _random_free_cell(self, room: Room) -> tuple[int, int] | None:
+        free = self._free_spawn_cells(room)
+        if free:
+            return random.choice(free)
+        spawn_points = self._spawn_points(room)
+        return random.choice(spawn_points) if spawn_points else None
+
     def _add_bot(self, room: Room) -> Tank | None:
-        free_points = self._free_spawn_cells(room)
-        if free_points:
-            x, y = random.choice(free_points)
-        else:
-            spawn_points = self._spawn_points(room)
-            if not spawn_points:
-                return None
-            x, y = random.choice(spawn_points)
+        cell = self._random_free_cell(room)
+        if cell is None:
+            return None
+        x, y = cell
 
         bot_name = f"Бот-{room.next_bot_index}"
         while any(t.name.casefold() == bot_name.casefold() for t in room.tanks):
@@ -337,25 +327,49 @@ class Game:
         room.tanks.append(tank)
         return tank
 
-    def _add_bot_wave(self, room: Room, count: int) -> int:
-        added = 0
-        for _ in range(count):
+    def _ensure_bot_count(self, room: Room) -> None:
+        """Доводит число живых ботов до BOT_TARGET_COUNT."""
+        alive_bots = sum(1 for t in room.tanks if t.alive and t.is_bot)
+        need = BOT_TARGET_COUNT - alive_bots
+        for _ in range(need):
             if self._add_bot(room) is None:
                 break
-            added += 1
-        return added
 
+    def _process_bot_respawns(self, room: Room, now: float) -> None:
+        """Возрождает мёртвых ботов, у которых истёк respawn_at."""
+        for tank in room.tanks:
+            if not tank.is_bot or tank.alive:
+                continue
+            if tank.respawn_at == 0 or tank.respawn_at > now:
+                continue
+            cell = self._random_free_cell(room)
+            if cell is None:
+                # Нет места — попробуем в следующий тик.
+                continue
+            x, y = cell
+            tank.alive = True
+            tank.x = x + 0.5
+            tank.y = y + 0.5
+            tank.direction = "вверх"
+            tank.level = 0
+            tank.shells.clear()
+            tank.shield_until = 0
+            tank.frozen_until = 0
+            tank.last_command_at = now
+            tank.next_bot_command_at = now
+            tank.respawn_at = 0
+
+    # ------------------------------------------------------------------
+    # Раунд
+    # ------------------------------------------------------------------
     def start_round(self, room: Room) -> None:
         self._ensure_map(room)
         room.bonuses = []
-        room.tanks = [t for t in room.tanks if not t.is_bot and t.alive]
 
+        # Игроков оставляем живых, ботов — удаляем и создадим заново ровно N.
+        room.tanks = [t for t in room.tanks if not t.is_bot and t.alive]
         room.next_bot_index = 1
-        # Первая волна — по тому же правилу: 2 × живых игроков.
-        # На старте игроков обычно 0 → волны не будет, спавн произойдёт
-        # после первого join и ближайшего тика.
-        self._add_bot_wave(room, self._next_wave_size(room))
-        room.next_bot_wave_at = time.time() + BOT_WAVE_INTERVAL_SECONDS
+        self._ensure_bot_count(room)
 
         for tank in room.tanks:
             tank.alive = True
@@ -367,6 +381,7 @@ class Game:
             tank.shield_until = 0
             tank.frozen_until = 0
             tank.last_command_at = time.monotonic()
+            tank.respawn_at = 0
 
         room.phase = "round"
         room.last_simulated_at = time.monotonic()
@@ -479,6 +494,9 @@ class Game:
                     owner = next((t for t in room.tanks if t.id == s.owner_id), None)
                     if owner is not None and owner.name.casefold() in registered_names:
                         owner.kills += 1
+                    # Мёртвому боту назначаем время респавна.
+                    if target.is_bot:
+                        target.respawn_at = time.monotonic() + BOT_RESPAWN_SECONDS
                     if random.random() < 0.3:
                         room.bonuses.append(Bonus(
                             id=room.object_id("bonus"),
@@ -491,10 +509,12 @@ class Game:
         for tank in room.tanks:
             tank.shells[:] = [s for s in tank.shells if s.id not in destroyed]
 
+        # Игроков-мертвецов убираем из комнаты (как раньше).
+        # Ботов НЕ удаляем — они ждут respawn_at.
         dead_players = {
             t.name.casefold()
             for t in room.tanks
-            if not t.alive and t.name.casefold() in registered_names
+            if not t.alive and not t.is_bot and t.name.casefold() in registered_names
         }
         if dead_players:
             room.tanks[:] = [t for t in room.tanks if t.name.casefold() not in dead_players]
@@ -525,6 +545,28 @@ class Game:
                             enemy.frozen_until = max(enemy.frozen_until, now + 5)
         room.bonuses = kept
 
+    # ------------------------------------------------------------------
+    # Логика ботов: охота на игрока с максимумом убийств
+    # ------------------------------------------------------------------
+    def _bot_target(self, room: Room, tank: Tank) -> Tank | None:
+        """
+        Цель бота — живой ИГРОК с максимальным числом убийств.
+        При равенстве kills — ближайший к боту.
+        Если игроков нет — None (бот стоит).
+        """
+        registered = {n.casefold() for n in room.registrations}
+        candidates = [
+            t for t in room.tanks
+            if t.alive and not t.is_bot and t.name.casefold() in registered
+        ]
+        if not candidates:
+            return None
+        # Максимум kills, затем минимум расстояния.
+        return min(
+            candidates,
+            key=lambda t: (-t.kills, (t.x - tank.x) ** 2 + (t.y - tank.y) ** 2),
+        )
+
     def _brick_command(self, room, tank, my_cell, blocked) -> str | None:
         tiles = room.tiles
         best: tuple[int, str] | None = None
@@ -550,45 +592,52 @@ class Game:
         return None
 
     def _bot_command(self, room, tank) -> str | None:
-        targets = [o for o in room.tanks if o.alive and o.id != tank.id]
-        if not targets:
+        target = self._bot_target(room, tank)
+        if target is None:
             return None
+
         tiles = room.tiles
         my_cell = (int(tank.x), int(tank.y))
+        target_cell = (int(target.x), int(target.y))
         blocked = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
-        targets.sort(key=lambda o: (o.x - tank.x) ** 2 + (o.y - tank.y) ** 2)
-        for enemy in targets:
-            enemy_cell = (int(enemy.x), int(enemy.y))
-            if _line_of_sight(tiles, my_cell, enemy_cell):
-                d = _direction_between(my_cell, enemy_cell)
-                if d is not None:
-                    return d if tank.direction != d else "выстрел"
+
+        # 1. Цель на линии видимости — разворот и выстрел.
+        if _line_of_sight(tiles, my_cell, target_cell):
+            d = _direction_between(my_cell, target_cell)
+            if d is not None:
+                return d if tank.direction != d else "выстрел"
+
+        # 2. Кирпич на пути — пробиваем.
         bc = self._brick_command(room, tank, my_cell, blocked)
         if bc is not None:
             return bc
-        for enemy in targets:
-            enemy_cell = (int(enemy.x), int(enemy.y))
-            goals = set()
-            for _, (dx, dy) in DIRECTIONS.items():
-                cell = (enemy_cell[0] + dx, enemy_cell[1] + dy)
-                tile = _tile_at(tiles, *cell)
-                if tile in PASSABLE_TILES and cell not in blocked:
-                    goals.add(cell)
-            if not goals:
-                continue
-            step = _bfs_next_step(tiles, my_cell, goals, blocked - {my_cell})
-            if step is not None:
-                return step
-        return None
 
+        # 3. Идём к цели напрямую.
+        step = _bfs_next_step(tiles, my_cell, {target_cell}, blocked - {my_cell})
+        if step is not None:
+            return step
+
+        # 4. Запасной вариант — соседние с целью клетки.
+        goals = set()
+        for _, (dx, dy) in DIRECTIONS.items():
+            cell = (target_cell[0] + dx, target_cell[1] + dy)
+            tile = _tile_at(tiles, *cell)
+            if tile in PASSABLE_TILES and cell not in blocked:
+                goals.add(cell)
+        return _bfs_next_step(tiles, my_cell, goals, blocked - {my_cell})
+
+    # ------------------------------------------------------------------
+    # Главный тик
+    # ------------------------------------------------------------------
     def next_room_event_delay(self, room: Room) -> float | None:
         mono = time.monotonic()
-        wall = time.time()
         delays = []
         if room.phase == "round":
-            if room.next_bot_wave_at is not None:
-                delays.append(max(0.0, room.next_bot_wave_at - wall))
             for tank in room.tanks:
+                if tank.is_bot and not tank.alive:
+                    if tank.respawn_at > 0:
+                        delays.append(max(0.0, tank.respawn_at - mono))
+                    continue
                 if not tank.alive:
                     continue
                 if tank.shield_until > mono:
@@ -613,12 +662,10 @@ class Game:
         if room.phase != "round":
             return
 
-        # Волна ботов: размер = 2 × живых игроков, интервал = 30 с.
-        if room.next_bot_wave_at is not None and wall >= room.next_bot_wave_at:
-            wave_size = self._next_wave_size(room)
-            if wave_size > 0:
-                self._add_bot_wave(room, wave_size)
-            room.next_bot_wave_at = wall + BOT_WAVE_INTERVAL_SECONDS
+        # 1) Респавн мёртвых ботов через BOT_RESPAWN_SECONDS.
+        self._process_bot_respawns(room, now)
+        # 2) Досоздать ботов, если их меньше BOT_TARGET_COUNT (старт, потери).
+        self._ensure_bot_count(room)
 
         self._move_shells(room, elapsed)
         self._collect_bonuses(room)
