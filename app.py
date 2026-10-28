@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from url_server import ip_server, port
+
 import asyncio
-import secrets
 from pathlib import Path
 from typing import Optional
 
+import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -116,9 +118,12 @@ async def send_command(payload: MessageRequest):
 
 
 @app.get("/api/state")
-async def room_state(after: Optional[int] = Query(default=None, ge=0)):
+async def room_state(after: Optional[int] = Query(default=None, ge=0), get_messages: bool = False):
     room = game.room
     if after is not None and room.state_version == after:
         async with state_condition:
             await state_condition.wait_for(lambda: room.state_version != after)
-    return game.room_state(room)
+    return game.room_state(get_messages)
+
+if __name__ == "__main__":
+    uvicorn.run(app, host=ip_server, port=port)

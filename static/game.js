@@ -1,3 +1,5 @@
+import {bonusesUnzip, shellsUnzip, tanksUnzip } from "./de_en_coding.js";
+
 const board = document.querySelector("#board");
 const ctx = board.getContext("2d");
 const statusLabel = document.querySelector("#room-status");
@@ -24,6 +26,8 @@ const TANK_COLOR_CSS = {
   "серый":      "#808080",
 };
 
+let tank_personal_color = {};
+
 function colorToCss(color, isBot) {
   if (isBot) return TANK_COLOR_CSS["серый"];
   return TANK_COLOR_CSS[color] || TANK_COLOR_CSS["серый"];
@@ -31,6 +35,39 @@ function colorToCss(color, isBot) {
 
 function tileColor(type) {
   return ({ 1: "#b76537", 2: "#87939a", 3: "#2474a1", 4: "#397447", 5: "#a5e7ef", 6: "#e3b837" })[type] || "#111820";
+}
+
+function drawTile(type, x, y) {
+  ctx.fillStyle = type === 4 ? "rgba(36,116,161,.85)" : tileColor(type);
+    ctx.fillRect(x, y, 1, 1);
+    if (type === 1) {
+      ctx.fillStyle = "#b76537";
+      ctx.fillRect(x + .06, y + .06, .88, .88);
+      ctx.fillStyle = "#8d4b26";
+      for (const [ox, oy, w, h] of [[.06, .06, .88, .26], [.06, .68, .88, .26], [.68, .06, .26, .88]]) {
+        ctx.fillRect(x + ox, y + oy, w, h);
+      }
+      ctx.strokeStyle = "#754225";
+      ctx.lineWidth = .045;
+      ctx.strokeRect(x + .07, y + .07, .86, .86);
+    }
+    if (type === 2) {
+      ctx.fillStyle = "#c7d3da";
+      ctx.fillRect(x + .12, y + .12, .76, .76);
+      ctx.fillStyle = "#9aa8b0";
+      ctx.fillRect(x + .04, y + .04, .92, .92);
+      ctx.strokeStyle = "#78888f";
+      ctx.lineWidth = .05;
+      ctx.strokeRect(x + .04, y + .04, .92, .92);
+    }
+    if (type === 5) {
+      ctx.fillStyle = "#b8edf4";
+      for (const [dx, dy] of [[.12, .18], [.2, .48], [.18, .76], [.7, .2], [.68, .52], [.74, .78]]) {
+        ctx.beginPath();
+        ctx.arc(x + dx, y + dy, .11, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
 }
 
 function draw() {
@@ -54,50 +91,27 @@ function draw() {
   ctx.fillStyle = "#111820";
   ctx.fillRect(0, 0, mapWidth, mapHeight);
 
-  for (const block of state.blocks) {
-    ctx.fillStyle = block.type === 4 ? "rgba(36,116,161,.85)" : tileColor(block.type);
-    ctx.fillRect(block.x, block.y, 1, 1);
-    if (block.type === 1) {
-      ctx.fillStyle = "#b76537";
-      ctx.fillRect(block.x + .06, block.y + .06, .88, .88);
-      ctx.fillStyle = "#8d4b26";
-      for (const [ox, oy, w, h] of [[.06, .06, .88, .26], [.06, .68, .88, .26], [.68, .06, .26, .88]]) {
-        ctx.fillRect(block.x + ox, block.y + oy, w, h);
-      }
-      ctx.strokeStyle = "#754225";
-      ctx.lineWidth = .045;
-      ctx.strokeRect(block.x + .07, block.y + .07, .86, .86);
-    }
-    if (block.type === 2) {
-      ctx.fillStyle = "#c7d3da";
-      ctx.fillRect(block.x + .12, block.y + .12, .76, .76);
-      ctx.fillStyle = "#9aa8b0";
-      ctx.fillRect(block.x + .04, block.y + .04, .92, .92);
-      ctx.strokeStyle = "#78888f";
-      ctx.lineWidth = .05;
-      ctx.strokeRect(block.x + .04, block.y + .04, .92, .92);
-    }
-    if (block.type === 5) {
-      ctx.fillStyle = "#b8edf4";
-      for (const [dx, dy] of [[.12, .18], [.2, .48], [.18, .76], [.7, .2], [.68, .52], [.74, .78]]) {
-        ctx.beginPath();
-        ctx.arc(block.x + dx, block.y + dy, .11, 0, Math.PI * 2);
-        ctx.fill();
-      }
+  let tiles_map = state.map.tiles;
+  for (let i_y = 0; i_y < state.map.height; i_y++) {
+    for (let i_x = 0; i_x < state.map.width; i_x++) {
+      drawTile(tiles_map[i_y][i_x], i_x, i_y);
     }
   }
-  for (const bonus of state.bonuses) {
+  for (const bonus_l of state.bonuses) {
+    let bonus = bonusesUnzip(bonus_l);
     drawBonus(bonus.type, bonus.x + .5, bonus.y + .5);
   }
-  for (const shell of state.shells) {
+  for (const shell_l of state.shells) {
+    let shell = shellsUnzip(shell_l);
     ctx.fillStyle = "#fff4b8";
     ctx.beginPath();
     ctx.arc(shell.x, shell.y, .09, 0, Math.PI * 2);
     ctx.fill();
   }
-  for (const tank of state.tanks) {
+  for (const tank_l of state.tanks) {
+    let tank = tanksUnzip(tank_l);
     if (!tank.alive) continue;
-    drawTank(tank.x, tank.y, tank.direction, tank.is_bot, tank.shielded, tank.color);
+    drawTank(tank.name, tank.x, tank.y, tank.direction, tank.is_bot, tank.shielded, tank.color);
   }
 }
 
@@ -135,8 +149,9 @@ function drawBonus(type, cx, cy) {
   }
 }
 
-function drawTank(x, y, direction, isBot, shielded, color) {
+function drawTank(name, x, y, direction, isBot, shielded, color) {
   const base = colorToCss(color, isBot);
+  tank_personal_color[name] = base;
   ctx.save();
   ctx.translate(x, y);
   if (direction === "вниз") ctx.rotate(Math.PI);
@@ -158,6 +173,12 @@ function drawTank(x, y, direction, isBot, shielded, color) {
   ctx.fillStyle = shielded ? "#ffffff" : base;
   ctx.fillRect(-.30, -.62, .26, .20);
   ctx.fillRect(.04, -.62, .26, .20);
+  ctx.restore();
+  ctx.save();
+  ctx.fillStyle = base;
+  ctx.font = "0.5px Arial";
+  ctx.textAlign = "center";
+  ctx.fillText(name, x, y - 0.75);
   ctx.restore();
 }
 
@@ -186,7 +207,9 @@ function showKills(kills) {
   for (const [name, count] of entries) {
     const item = document.createElement("li");
     const label = document.createElement("span");
+    const tankColor = tank_personal_color[name];
     label.textContent = name;
+    if (tankColor) label.style.color = tankColor;
     const value = document.createElement("strong");
     value.textContent = String(count);
     item.append(label, value);
@@ -200,7 +223,8 @@ async function pollState() {
   try {
     stateRequest = new AbortController();
     const after = stateVersion == null ? "" : `?after=${stateVersion}`;
-    const response = await fetch(`/api/state${after}`, {
+    const get_messages = (after != "" ? "&" : "?") + `get_messages=false`;
+    const response = await fetch(`/api/state${after}${get_messages}`, {
       signal: stateRequest.signal
     });
     if (!response.ok) throw new Error("Не удалось получить состояние комнаты.");

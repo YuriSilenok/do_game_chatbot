@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Literal
 
+from de_en_coding import tanks_zip, shells_zip, bonuses_zip
 
 MAP_TEMPLATE = [
     [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
@@ -799,7 +800,8 @@ class Game:
 
         room.updated_at = wall_now
 
-    def room_state(self, room: Room) -> dict:
+    def room_state(self, get_messages: bool = False) -> dict:
+        room = self.room
         tiles = room.tiles or MAP_TEMPLATE
         registered_names = {name.casefold() for name in room.registrations}
         return {
@@ -807,7 +809,7 @@ class Game:
             "state_version": room.state_version,
             "map": {"width": MAP_WIDTH, "height": MAP_HEIGHT, "tiles": tiles},
             "tanks": [
-                {
+                tanks_zip({
                     "id": tank.id,
                     "name": tank.name,
                     "is_bot": tank.is_bot,
@@ -819,28 +821,22 @@ class Game:
                     "level": tank.level,
                     "shielded": tank.shield_until > time.monotonic(),
                     "frozen": tank.frozen_until > time.monotonic(),
-                }
+                })
                 for tank in room.tanks
             ],
             "shells": [
-                {
+                shells_zip({
                     "id": shell.id,
                     "owner_id": shell.owner_id,
                     "x": shell.x,
                     "y": shell.y,
                     "direction": shell.direction,
-                }
+                })
                 for tank in room.tanks
                 for shell in tank.shells
             ],
-            "blocks": [
-                {"x": x, "y": y, "type": tile, "hp": room.brick_hp.get((x, y))}
-                for y, row in enumerate(tiles)
-                for x, tile in enumerate(row)
-                if tile != 0
-            ],
             "bonuses": [
-                {"id": bonus.id, "type": bonus.kind, "x": bonus.x, "y": bonus.y}
+                bonuses_zip({"id": bonus.id, "type": bonus.kind, "x": bonus.x, "y": bonus.y})
                 for bonus in room.bonuses
             ],
             "kills": dict(sorted(
@@ -851,7 +847,7 @@ class Game:
                 ),
                 key=lambda item: -item[1],
             )),
-            "messages": list(room.messages),
+            "messages": list(room.messages) if get_messages else [],
             "server_time": time.time(),
         }
 

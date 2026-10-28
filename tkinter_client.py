@@ -5,8 +5,12 @@ import tkinter as tk
 import urllib.error
 import urllib.request
 
+from url_server import url_server
 
-SERVER_URL = "http://193.124.115.164:8000"
+
+# SERVER_URL = "http://193.124.115.164:8000"
+SERVER_URL = url_server
+
 COMMANDS = {
     "up": "вверх",
     "down": "вниз",
@@ -143,7 +147,8 @@ class TankClient:
         state_version = None
         while not stop_event.is_set():
             after = "" if state_version is None else f"?after={state_version}"
-            request = urllib.request.Request(f"{SERVER_URL}/api/state{after}")
+            get_messages = ("&" if after != "" else "?") + f"get_messages=false"
+            request = urllib.request.Request(f"{SERVER_URL}/api/state{after}{get_messages}")
             try:
                 with urllib.request.urlopen(request, timeout=35) as response:
                     state = json.loads(response.read().decode("utf-8"))

@@ -184,7 +184,7 @@ class GameTests(unittest.TestCase):
         self.assertIn(attacker, self.room.tanks)
         self.assertNotIn(target, self.room.tanks)
         self.assertNotIn("Цель", self.room.registrations)
-        state = self.game.room_state(self.room)
+        state = self.game.room_state()
         self.assertEqual(state["kills"]["Игрок"], 1)
         self.assertNotIn("Цель", state["kills"])
         self.assertNotIn("wins", state)
@@ -216,7 +216,7 @@ class GameTests(unittest.TestCase):
         self.room.tanks.extend((player, unregistered_tank))
         self.room.registrations.append(player.name)
 
-        self.assertEqual(self.game.room_state(self.room)["kills"], {"Игрок": 3})
+        self.assertEqual(self.game.room_state()["kills"], {"Игрок": 3})
 
     def test_map_template_matches_documented_size(self):
         self.assertEqual(MAP_WIDTH, 26)
