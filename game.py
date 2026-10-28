@@ -41,10 +41,9 @@ STATE_LONGPOLL_SECONDS = 25.0
 SHELL_EVENT_SECONDS = 0.05
 BONUS_TYPES = ("звезда", "шлем", "часы")
 
-# CHANGED: интервал между волнами фиксирован, а РАЗМЕР каждой волны
-# вычисляется как max(1, 30 - сумма убийств активных игроков).
+# Волны ботов: размер = 2 × живых игроков, интервал фиксирован.
 BOT_WAVE_INTERVAL_SECONDS = 30.0
-BOT_WAVE_BASE_SIZE = 30
+BOTS_PER_PLAYER = 2
 
 TANK_COLORS = [
     "красный", "зелёный", "синий", "оранжевый",
@@ -112,7 +111,6 @@ class Room:
     last_simulated_at: float = field(default_factory=time.monotonic)
     updated_at: float = field(default_factory=time.time)
     color_counter: int = 0
-    # CHANGED: next_bot_wave_at вместо bot_wave_index/bot_wave_started_at.
     next_bot_wave_at: float | None = None
     next_bot_index: int = 1
 
@@ -281,25 +279,21 @@ class Game:
         return room.spawn_points
 
     # ------------------------------------------------------------------
-    # Волны ботов: размер = 30 - сумма убийств активных игроков
+    # Волны ботов: размер = 2 × живых игроков
     # ------------------------------------------------------------------
-    def _total_player_kills(self, room: Room) -> int:
-        """
-        Суммарные убийства АКТИВНЫХ игроков:
-        зарегистрированные + живые + не боты. Боты не в счёт.
-        """
+    def _alive_players(self, room: Room) -> int:
+        """Живые игроки (не боты) в комнате."""
         registered = {name.casefold() for name in room.registrations}
-        total = 0
-        for tank in room.tanks:
-            if (tank.alive
-                    and not tank.is_bot
-                    and tank.name.casefold() in registered):
-                total += tank.kills
-        return total
+        return sum(
+            1 for t in room.tanks
+            if t.alive
+            and not t.is_bot
+            and t.name.casefold() in registered
+        )
 
     def _next_wave_size(self, room: Room) -> int:
-        """Размер следующей волны: 30 - сумма убийств активных игроков (мин. 1)."""
-        return max(1, BOT_WAVE_BASE_SIZE - self._total_player_kills(room))
+        """Размер волны = 2 × живых игроков (0, если игроков нет)."""
+        return BOTS_PER_PLAYER * self._alive_players(room)
 
     def _free_spawn_cells(self, room: Room) -> list[tuple[int, int]]:
         used_cells = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
@@ -357,9 +351,10 @@ class Game:
         room.tanks = [t for t in room.tanks if not t.is_bot and t.alive]
 
         room.next_bot_index = 1
-        # Первая волна — сразу, с размером, равным 30 (убийств ещё нет).
-        first_wave = self._next_wave_size(room)
-        self._add_bot_wave(room, first_wave)
+        # Первая волна — по тому же правилу: 2 × живых игроков.
+        # На старте игроков обычно 0 → волны не будет, спавн произойдёт
+        # после первого join и ближайшего тика.
+        self._add_bot_wave(room, self._next_wave_size(room))
         room.next_bot_wave_at = time.time() + BOT_WAVE_INTERVAL_SECONDS
 
         for tank in room.tanks:
@@ -618,10 +613,11 @@ class Game:
         if room.phase != "round":
             return
 
-        # CHANGED: размер волны = 30 - убийства активных игроков, интервал — 30 с.
+        # Волна ботов: размер = 2 × живых игроков, интервал = 30 с.
         if room.next_bot_wave_at is not None and wall >= room.next_bot_wave_at:
             wave_size = self._next_wave_size(room)
-            self._add_bot_wave(room, wave_size)
+            if wave_size > 0:
+                self._add_bot_wave(room, wave_size)
             room.next_bot_wave_at = wall + BOT_WAVE_INTERVAL_SECONDS
 
         self._move_shells(room, elapsed)
