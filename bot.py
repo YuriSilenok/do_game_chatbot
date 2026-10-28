@@ -1,31 +1,37 @@
 # bot.py
 """
-Отдельный ИИ-бот для танковой игры.
+ИИ-бот для танковой игры без задержек.
+
+Отличия от первой версии:
+  * команды шлются на /api/commands с полем "command" (как у tkinter-клиента);
+  * /api/state запрашивается БЕЗ after — мгновенный ответ, без long-poll'а;
+  * отправка команд и получение состояния идут в двух независимых корутинах;
+  * бот применяет свои команды к локальной копии состояния (оптимистично),
+    поэтому не ждёт ответа сервера, чтобы принять следующее решение;
+  * cooldown между командами снижен до минимальной защиты от дублирования.
 
 Алгоритм:
-  1. Найти ближайшего противника.
-  2. Если маршрут до ближайшего противника есть:
-       - есть прямая видимость  -> стрелять в противника;
-       - нет прямой видимости   -> двигаться к противнику.
-  3. Если маршрута до ближайшего противника нет:
-       - найти ближайшую стену;
-       - есть маршрут до стены и прямая видимость -> стрелять в стену;
-       - есть маршрут до стены, но нет видимости  -> двигаться к стене.
-
-Пока до противника есть маршрут — бот НИКОГДА не переключается на стену.
+  1. Ближайший противник — если до него есть путь, идём/стреляем в него.
+  2. Иначе — ближайший кирпич: к нему или в него.
 """
+
+from __future__ import annotations
 
 import asyncio
 import time
 from collections import deque
+from typing import Iterable
 
 import aiohttp
 
 
 BASE_URL = "http://0.0.0.0:8080"
 BOT_NAME = "Бот-Разведчик"
-POLL_INTERVAL = 0.15
-COMMAND_COOLDOWN = 0.20
+
+# Минимальная защита от двух одинаковых команд в одном такте.
+COMMAND_COOLDOWN = 0.05
+# Верхняя граница сна между итерациями, если сервер очень медленный.
+MAX_SLEEP = 0.20
 
 
 DIRECTIONS = {
@@ -35,22 +41,21 @@ DIRECTIONS = {
     "вправо": (1, 0),
 }
 
-BLOCKING_TILES = {1, 2, 4, 6}      # кирпич, сталь, вода, бетон
-PASSABLE_TILES = {0, 3, 5}         # пусто, лёд, трава
+BLOCKING_TILES = {1, 2, 4, 6}
+PASSABLE_TILES = {0, 3, 5}
 BRICK_TILE = 1
 
 
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
 # ---------------------------------------------------------------------------
-def tile_at(tiles, x, y):
+def tile_at(tiles, x: int, y: int):
     if 0 <= y < len(tiles) and 0 <= x < len(tiles[0]):
         return tiles[y][x]
     return None
 
 
-def line_of_sight(tiles, first, second):
-    """Проверяет, что между двумя клетками нет блокирующих тайлов."""
+def line_of_sight(tiles, first, second) -> bool:
     x1, y1 = first
     x2, y2 = second
     x_start, y_start = x1 + 0.5, y1 + 0.5
@@ -67,7 +72,6 @@ def line_of_sight(tiles, first, second):
 
 
 def direction_between(src, dst):
-    """Возвращает направление, если клетки стоят на одной линии."""
     dx = dst[0] - src[0]
     dy = dst[1] - src[1]
     if dx == 0 and dy != 0:
@@ -78,25 +82,18 @@ def direction_between(src, dst):
 
 
 def shoot_direction(tiles, src, dst):
-    """Направление выстрела, если цель видна и на одной линии, иначе None."""
     if not line_of_sight(tiles, src, dst):
         return None
     return direction_between(src, dst)
 
 
 def bfs_next_step(tiles, start, goals, blocked):
-    """
-    Ищет кратчайший путь от start до любой клетки из goals.
-    Возвращает первое направление шага или None, если пути нет.
-    """
-    if start in goals:
+    if start in goals or not goals:
         return None
-
     height = len(tiles)
     width = len(tiles[0])
     queue = deque([(start, None)])
     visited = {start}
-
     while queue:
         (x, y), first_dir = queue.popleft()
         for name, (dx, dy) in DIRECTIONS.items():
@@ -115,34 +112,17 @@ def bfs_next_step(tiles, start, goals, blocked):
 
 
 def nearest_enemy(me, enemies):
-    """Ближайший противник по евклидову расстоянию."""
     if not enemies:
         return None
     mx, my = me["x"], me["y"]
     return min(enemies, key=lambda e: (e["x"] - mx) ** 2 + (e["y"] - my) ** 2)
 
 
-def nearest_brick(tiles, start):
-    """Ближайший кирпич по манхэттенскому расстоянию."""
-    height = len(tiles)
-    width = len(tiles[0])
-    best = None
-    best_dist = None
-    for y in range(height):
-        for x in range(width):
-            if tiles[y][x] == BRICK_TILE:
-                dist = abs(x - start[0]) + abs(y - start[1])
-                if best_dist is None or dist < best_dist:
-                    best_dist = dist
-                    best = (x, y)
-    return best
-
-
-def cells_next_to(target_cell, tiles, blocked, exclude=None):
-    """Проходимые клетки, соседние с target_cell."""
+def cells_next_to(target_cell, tiles, blocked, exclude=None) -> set:
     result = set()
+    tx, ty = target_cell
     for _, (dx, dy) in DIRECTIONS.items():
-        cell = (target_cell[0] + dx, target_cell[1] + dy)
+        cell = (tx + dx, ty + dy)
         if exclude is not None and cell == exclude:
             continue
         if tile_at(tiles, *cell) in PASSABLE_TILES and cell not in blocked:
@@ -150,18 +130,18 @@ def cells_next_to(target_cell, tiles, blocked, exclude=None):
     return result
 
 
-def cells_on_line_with(target_cell, tiles, blocked, exclude=None, radius=12):
+def cells_on_line_with(target_cell, tiles, blocked, exclude=None) -> set:
     """
-    Проходимые клетки, с которых target_cell виден по одной из осей
-    (на одной линии и без блоков между).
+    Проходимые клетки, с которых target_cell виден по оси.
+    Останавливаемся на первом блокере — это и есть естественная граница видимости.
     """
     result = set()
     tx, ty = target_cell
+    height = len(tiles)
+    width = len(tiles[0])
     for _, (dx, dy) in DIRECTIONS.items():
         x, y = tx + dx, ty + dy
-        for _ in range(radius):
-            if tile_at(tiles, x, y) is None:
-                break
+        while 0 <= x < width and 0 <= y < height:
             tile = tiles[y][x]
             if tile in BLOCKING_TILES:
                 break
@@ -174,11 +154,6 @@ def cells_on_line_with(target_cell, tiles, blocked, exclude=None, radius=12):
 
 
 def path_to_any_goal(tiles, start, goals, blocked):
-    """
-    Возвращает (has_path, step):
-      has_path — есть ли путь до goals (или start уже в goals);
-      step     — первое направление шага или None, если шаг не нужен.
-    """
     if not goals:
         return False, None
     if start in goals:
@@ -190,198 +165,301 @@ def path_to_any_goal(tiles, start, goals, blocked):
 
 
 # ---------------------------------------------------------------------------
+# Локальная модель состояния
+# ---------------------------------------------------------------------------
+class LocalState:
+    """
+    Копия серверного состояния + учёт ещё не подтверждённых команд.
+    Позволяет боту принимать решения без ожидания ответа сервера.
+    """
+
+    __slots__ = ("raw", "me", "enemies", "tiles", "blocked", "bricks",
+                 "last_server_version", "my_id")
+
+    def __init__(self):
+        self.raw = None
+        self.me = None
+        self.enemies: list = []
+        self.tiles: list = []
+        self.blocked: set = set()
+        self.bricks: list = []
+        self.last_server_version = None
+        self.my_id: str | None = None
+
+    # ---- подтягиваем с сервера ----------------------------------------
+    def update_from_server(self, state: dict, my_name: str) -> None:
+        self.raw = state
+        self.last_server_version = state.get("state_version")
+        map_info = state.get("map") or {}
+        self.tiles = map_info.get("tiles") or []
+
+        tanks = state.get("tanks") or []
+        me = next(
+            (t for t in tanks if t.get("alive") and t.get("name") == my_name),
+            None,
+        )
+        # Если сервер вернул «меня» — используем серверную копию.
+        self.me = dict(me) if me is not None else None
+        self.my_id = self.me["id"] if self.me else None
+        self.enemies = [
+            dict(t) for t in tanks
+            if t.get("alive") and t.get("id") != self.my_id
+        ]
+        self.blocked = {
+            (int(t["x"]), int(t["y"])) for t in tanks if t.get("alive")
+        }
+        self.bricks = [
+            (x, y)
+            for y, row in enumerate(self.tiles)
+            for x, tile in enumerate(row)
+            if tile == BRICK_TILE
+        ]
+
+    # ---- оптимистично применяем свою команду --------------------------
+    def apply_command(self, command: str) -> None:
+        me = self.me
+        if me is None:
+            return
+
+        if command in DIRECTIONS:
+            if me["direction"] != command:
+                me["direction"] = command
+            else:
+                # Та же логика, что в game.py: если направление совпадает —
+                # пробуем сдвинуться на клетку.
+                dx, dy = DIRECTIONS[command]
+                nx = me["x"] + dx
+                ny = me["y"] + dy
+                if self._can_occupy(nx, ny, me):
+                    me["x"] = nx
+                    me["y"] = ny
+        elif command == "выстрел":
+            # Снаряд не моделируем — сервер пришлёт его в следующем state.
+            pass
+
+    def _can_occupy(self, x: float, y: float, me: dict) -> bool:
+        radius = 0.29
+        for cx in (int(x - radius), int(x + radius)):
+            for cy in (int(y - radius), int(y + radius)):
+                if not (0 <= cx < len(self.tiles[0])
+                        and 0 <= cy < len(self.tiles)):
+                    return False
+                if self.tiles[cy][cx] in (1, 2, 6):
+                    return False
+        for other in self.enemies:
+            if abs(other["x"] - x) < 0.58 and abs(other["y"] - y) < 0.58:
+                return False
+        return True
+
+
+# ---------------------------------------------------------------------------
 # Клиент игры
 # ---------------------------------------------------------------------------
 class BotClient:
-    def __init__(self, base_url, name):
+    def __init__(self, base_url: str, name: str):
         self.base_url = base_url.rstrip("/")
         self.name = name
-        self.session = None
-        self.last_command_at = 0.0
-        self.color = None
-        self.state_version = None
+        self.session: aiohttp.ClientSession | None = None
+        self.state = LocalState()
+
+        self._command_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._last_command_at = 0.0
+        self._last_command: str | None = None
+        self._joined = False
 
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession()
+        # Держим одно TCP-соединение; keep-alive по умолчанию.
+        connector = aiohttp.TCPConnector(limit=8, ttl_dns_cache=300)
+        self.session = aiohttp.ClientSession(connector=connector)
         return self
 
     async def __aexit__(self, *exc_info):
         if self.session:
             await self.session.close()
 
-    # -- HTTP-обёртки ------------------------------------------------------
-    async def get_state(self):
-        after = "" if self.state_version is None else f"?after={self.state_version}"
-        async with self.session.get(
-            f"{self.base_url}/api/state{after}"
-        ) as resp:
-            resp.raise_for_status()
-            state = await resp.json()
-            self.state_version = state["state_version"]
-            return state
+    # -- HTTP ------------------------------------------------------------
+    async def _fetch_state(self) -> dict | None:
+        try:
+            async with self.session.get(
+                f"{self.base_url}/api/state",
+                headers={"Accept": "application/json"},
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                return await resp.json()
+        except Exception:
+            return None
 
-    async def send_message(self, text):
-        payload = {"sender": self.name, "text": text}
-        async with self.session.post(
-            f"{self.base_url}/api/messages", json=payload
-        ) as resp:
-            resp.raise_for_status()
+    async def _post_command(self, command: str) -> bool:
+        payload = {"sender": self.name, "command": command}
+        try:
+            async with self.session.post(
+                f"{self.base_url}/api/commands", json=payload
+            ) as resp:
+                return resp.status in (200, 201)
+        except Exception:
+            return False
 
-    async def join(self):
-        payload = {"name": self.name}
-        async with self.session.post(
-            f"{self.base_url}/api/join", json=payload
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            self.color = data.get("your_color")
+    async def _join(self) -> bool:
+        try:
+            async with self.session.post(
+                f"{self.base_url}/api/join", json={"name": self.name}
+            ) as resp:
+                if resp.status != 200:
+                    return False
+                data = await resp.json()
+                self.state.my_id = data.get("your_tank_id")
+                return bool(self.state.my_id)
+        except Exception:
+            return False
 
-    # -- Логика бота -------------------------------------------------------
-    def find_me(self, state):
-        for tank in state.get("tanks", []):
-            if tank.get("name") == self.name and tank.get("alive"):
-                return tank
-        return None
+    # -- корутины ---------------------------------------------------------
+    async def _state_loop(self):
+        """Непрерывно тянет состояние с сервера и обновляет локальную копию."""
+        while True:
+            state = await self._fetch_state()
+            if state is not None:
+                self.state.update_from_server(state, self.name)
+                if not self._joined and self.state.me is not None:
+                    self._joined = True
+            # Чем быстрее сервер отвечает, тем быстрее цикл.
+            await asyncio.sleep(0)
 
-    def find_enemies(self, state):
-        return [
-            t for t in state.get("tanks", [])
-            if t.get("alive") and t.get("name") != self.name
-        ]
+    async def _command_loop(self):
+        """Выгребает очередь команд и шлёт их на сервер пачками по одной."""
+        while True:
+            command = await self._command_queue.get()
+            try:
+                ok = await self._post_command(command)
+                if ok:
+                    self._last_command_at = time.monotonic()
+                    self._last_command = command
+            finally:
+                self._command_queue.task_done()
 
-    def turn_or_shoot(self, my_dir, target_cell, tiles, my_cell):
-        """
-        Если цель на линии и видна — развернуться к ней и выстрелить.
-        Возвращает команду или None.
-        """
-        shoot_dir = shoot_direction(tiles, my_cell, target_cell)
+    # -- принятие решений ------------------------------------------------
+    def _turn_or_shoot(self, target_cell) -> str | None:
+        me = self.state.me
+        if me is None:
+            return None
+        my_cell = (int(me["x"]), int(me["y"]))
+        shoot_dir = shoot_direction(self.state.tiles, my_cell, target_cell)
         if shoot_dir is None:
             return None
-        if my_dir != shoot_dir:
+        if me["direction"] != shoot_dir:
             return shoot_dir
         return "выстрел"
 
-    def choose_command(self, state):
-        me = self.find_me(state)
-        if me is None:
+    def _choose_command(self) -> str | None:
+        me = self.state.me
+        if me is None or not self.state.tiles:
             return None
 
-        tiles = state["map"]["tiles"]
-        blocked_all = {
-            (int(t["x"]), int(t["y"]))
-            for t in state.get("tanks", [])
-            if t.get("alive")
-        }
+        tiles = self.state.tiles
         my_cell = (int(me["x"]), int(me["y"]))
-        my_dir = me["direction"]
-        # Себя не считаем препятствием для BFS.
-        blocked = blocked_all - {my_cell}
+        blocked = self.state.blocked - {my_cell}
 
-        # ----- 1. Ближайший противник ------------------------------------
-        enemy = nearest_enemy(me, self.find_enemies(state))
+        # ----- 1. Ближайший противник ----------------------------------
+        enemy = nearest_enemy(me, self.state.enemies)
         if enemy is not None:
             enemy_cell = (int(enemy["x"]), int(enemy["y"]))
-
-            enemy_goals = (
+            goals = (
                 cells_next_to(enemy_cell, tiles, blocked, exclude=my_cell)
                 | cells_on_line_with(enemy_cell, tiles, blocked, exclude=my_cell)
             )
-            has_path, step = path_to_any_goal(
-                tiles, my_cell, enemy_goals, blocked
-            )
-
+            has_path, step = path_to_any_goal(tiles, my_cell, goals, blocked)
             if has_path:
-                # 1a. Можем стрелять прямо сейчас?
-                command = self.turn_or_shoot(
-                    my_dir, enemy_cell, tiles, my_cell
-                )
-                if command is not None:
-                    return command
-
-                # 1b. Стрелять нельзя, но можно двигаться.
+                cmd = self._turn_or_shoot(enemy_cell)
+                if cmd is not None:
+                    return cmd
                 if step is not None:
                     return step
-
-                # step is None -> мы уже в goals, но стрелять не можем
-                # (например, враг по диагонали). Делаем шаг в сторону,
-                # чтобы встать на линию.
+                # Стоим в goals, но стрелять нельзя — шаг на линию.
                 side_goals = cells_on_line_with(
                     enemy_cell, tiles, blocked, exclude=my_cell
                 )
                 if side_goals:
-                    side_step = bfs_next_step(
-                        tiles, my_cell, side_goals, blocked
-                    )
-                    if side_step is not None:
-                        return side_step
-
-                # До противника путь формально есть — на стену
-                # не переключаемся.
+                    side = bfs_next_step(tiles, my_cell, side_goals, blocked)
+                    if side is not None:
+                        return side
                 return None
 
-        # ----- 2. Ближайшая стена ----------------------------------------
-        brick = nearest_brick(tiles, my_cell)
-        if brick is None:
+        # ----- 2. Ближайший кирпич --------------------------------------
+        if not self.state.bricks:
             return None
-
-        brick_goals = (
+        brick = min(
+            self.state.bricks,
+            key=lambda b: abs(b[0] - my_cell[0]) + abs(b[1] - my_cell[1]),
+        )
+        goals = (
             cells_next_to(brick, tiles, blocked, exclude=my_cell)
             | cells_on_line_with(brick, tiles, blocked, exclude=my_cell)
         )
-        has_path, step = path_to_any_goal(
-            tiles, my_cell, brick_goals, blocked
-        )
+        has_path, step = path_to_any_goal(tiles, my_cell, goals, blocked)
         if not has_path:
             return None
-
-        # 2a. Можем стрелять в стену?
-        command = self.turn_or_shoot(my_dir, brick, tiles, my_cell)
-        if command is not None:
-            return command
-
-        # 2b. Стрелять нельзя — двигаемся к стене.
+        cmd = self._turn_or_shoot(brick)
+        if cmd is not None:
+            return cmd
         if step is not None:
             return step
-
-        # Уже в goals, но не на линии с кирпичом — шаг в сторону.
         side_goals = cells_on_line_with(brick, tiles, blocked, exclude=my_cell)
         if side_goals:
-            side_step = bfs_next_step(tiles, my_cell, side_goals, blocked)
-            if side_step is not None:
-                return side_step
+            side = bfs_next_step(tiles, my_cell, side_goals, blocked)
+            if side is not None:
+                return side
         return None
 
-    async def tick(self):
+    def _decide(self):
+        """Вызывается синхронно каждый оборот event loop'а."""
         now = time.monotonic()
-        if now - self.last_command_at < COMMAND_COOLDOWN:
+        if now - self._last_command_at < COMMAND_COOLDOWN:
             return
-        try:
-            state = await self.get_state()
-        except Exception as exc:
-            print(f"[bot] Не удалось получить состояние: {exc}")
+        if self.state.me is None or self.state.me.get("frozen"):
             return
-        if state.get("status") != "round":
-            return
-        command = self.choose_command(state)
-        if not command:
-            return
-        try:
-            await self.send_message(command)
-            self.last_command_at = now
-        except Exception as exc:
-            print(f"[bot] Не удалось отправить команду: {exc}")
 
-    async def run(self):
-        print(f"[bot] Запуск в общей комнате, имя {self.name}")
-        try:
-            await self.join()
-            print(f"[bot] Зарегистрирован. Цвет: {self.color}")
-        except Exception as exc:
-            print(f"[bot] Ошибка регистрации: {exc}")
+        command = self._choose_command()
+        if command is None:
             return
+        # Не дублируем ту же команду в соседних тактах — это ничего не даёт.
+        if command == self._last_command and command != "выстрел":
+            return
+
+        # Оптимистично применяем к локальной копии СРАЗУ, чтобы следующая
+        # итерация принимала решение уже с новым положением/направлением.
+        self.state.apply_command(command)
+        self._last_command = command
+        # Защита от переполнения очереди, если сервер тормозит.
+        if self._command_queue.qsize() < 8:
+            self._command_queue.put_nowait(command)
+
+    async def _decision_loop(self):
+        """Крутится без сна: одна итерация — один шанс на команду."""
         while True:
-            await self.tick()
-            await asyncio.sleep(POLL_INTERVAL)
+            try:
+                self._decide()
+            except Exception as exc:  # никогда не падаем в цикле
+                print(f"[bot] decide error: {exc}")
+            await asyncio.sleep(0)
+
+    # -- регистрация -----------------------------------------------------
+    async def _join_loop(self):
+        """Пытается зарегистрироваться, пока не получится (сервер может лежать)."""
+        while True:
+            if await self._join():
+                print(f"[bot] Зарегистрирован как {self.name}")
+                return
+            print("[bot] Регистрация не удалась, повтор через 1 с")
+            await asyncio.sleep(1)
+
+    # -- запуск ----------------------------------------------------------
+    async def run(self):
+        await self._join_loop()
+        await asyncio.gather(
+            self._state_loop(),
+            self._command_loop(),
+            self._decision_loop(),
+        )
 
 
 # ---------------------------------------------------------------------------

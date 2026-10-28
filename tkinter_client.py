@@ -8,12 +8,22 @@ import urllib.request
 
 SERVER_URL = "http://193.124.115.164:8000"
 COMMANDS = {
+    # Стрелки
     "up": "вверх",
     "down": "вниз",
     "left": "влево",
     "right": "вправо",
+    # WASD
+    "w": "вверх",
+    "s": "вниз",
+    "a": "влево",
+    "d": "вправо",
+    # Огонь
     "space": "выстрел",
 }
+
+# Клавиши, которые нужно «глушить» на release (чтобы не скроллить канвас и т.п.)
+CONTROL_KEYS = {"up", "down", "left", "right", "w", "a", "s", "d", "space"}
 
 
 class TankClient:
@@ -40,9 +50,11 @@ class TankClient:
         self.join_button = tk.Button(frame, text="Подключиться", command=self.join)
         self.join_button.grid(row=1, column=1, pady=(4, 12))
 
-        tk.Label(frame, text="Управление: стрелки и пробел", anchor="w").grid(
-            row=2, column=0, columnspan=2, sticky="ew"
-        )
+        tk.Label(
+            frame,
+            text="Управление: стрелки / WASD и пробел",
+            anchor="w",
+        ).grid(row=2, column=0, columnspan=2, sticky="ew")
         self.status = tk.StringVar(value="Введите имя и подключитесь к общей комнате.")
         tk.Label(frame, textvariable=self.status, anchor="w", wraplength=330).grid(
             row=3, column=0, columnspan=2, pady=(10, 0), sticky="ew"
@@ -200,9 +212,12 @@ class TankClient:
     def on_key_press(self, event):
         key = event.keysym.lower()
         command = COMMANDS.get(key)
-        if command is None or not self.connected:
+        if command is None:
             return
+        # Не перехватываем WASD, когда игрок печатает имя.
         if self.root.focus_get() == self.name_entry:
+            return
+        if not self.connected:
             return
         if key in self.pressed_keys:
             return "break"
@@ -215,7 +230,7 @@ class TankClient:
 
     def on_key_release(self, event):
         key = event.keysym.lower()
-        if key in COMMANDS:
+        if key in CONTROL_KEYS:
             self.pressed_keys.discard(key)
             return "break"
 
