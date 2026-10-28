@@ -35,7 +35,8 @@ DIRECTIONS = {
     "вправо": (1, 0),
 }
 TILE_SIZE = 32
-BOT_COMMAND_SECONDS = 1
+# Быстрый такт бота: ~6-7 решений в секунду.
+BOT_COMMAND_SECONDS = 0.15
 PLAYER_IDLE_SECONDS = 30
 STATE_LONGPOLL_SECONDS = 25.0
 SHELL_EVENT_SECONDS = 0.05
@@ -417,6 +418,7 @@ class Game:
         return True
 
     def apply_command(self, room: Room, tank: Tank, command: str) -> None:
+        """Для ИГРОКОВ: поворот и шаг — раздельно."""
         if not tank.alive or tank.frozen_until > time.monotonic():
             return
         if command in DIRECTIONS:
@@ -426,6 +428,16 @@ class Game:
                 tank.direction = command
         elif command == "выстрел":
             self.fire(room, tank)
+
+    def _bot_step(self, room: Room, tank: Tank, direction: str) -> None:
+        """
+        Для БОТОВ: поворот и шаг за ОДИН такт.
+        Если направление не совпадает — сначала поворот, затем сразу шаг.
+        Это устраняет потерю такта при смене направления.
+        """
+        if tank.direction != direction:
+            tank.direction = direction
+        self._move_tank_one_tile(room, tank, direction)
 
     def _move_shells(self, room: Room, dt: float) -> None:
         shells = [s for t in room.tanks for s in t.shells]
@@ -555,8 +567,8 @@ class Game:
 
     def _bot_command(self, room: Room, tank: Tank) -> str | None:
         """
-        Бот стреляет ТОЛЬКО если цель на линии видимости (нет блокеров)
-        и на одной оси. Иначе — BFS-шаг к клетке цели (без разрушения стен).
+        Стреляем ТОЛЬКО если цель на линии видимости и на одной оси.
+        Иначе — BFS-шаг к клетке цели (без разрушения стен).
         """
         target = self._bot_target(room, tank)
         if target is None:
@@ -567,18 +579,15 @@ class Game:
         target_cell = (int(target.x), int(target.y))
         blocked = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
 
-        # 1. Цель на линии видимости — разворот/выстрел.
         if _line_of_sight(tiles, my_cell, target_cell):
             d = _direction_between(my_cell, target_cell)
             if d is not None:
                 return d if tank.direction != d else "выстрел"
 
-        # 2. Не на линии — только идём к цели. Кирпичи НЕ трогаем.
         step = _bfs_next_step(tiles, my_cell, {target_cell}, blocked - {my_cell})
         if step is not None:
             return step
 
-        # 3. Прямой путь к клетке цели закрыт — идём к соседним клеткам.
         goals = set()
         for _, (dx, dy) in DIRECTIONS.items():
             cell = (target_cell[0] + dx, target_cell[1] + dy)
@@ -639,9 +648,15 @@ class Game:
                 continue
             if tank.is_bot and now >= tank.next_bot_command_at:
                 cmd = self._bot_command(room, tank)
-                if cmd is not None:
-                    self.apply_command(room, tank, cmd)
-                tank.next_bot_command_at = now + BOT_COMMAND_SECONDS
+                if cmd == "выстрел":
+                    self.fire(room, tank)
+                    # Выстрел не требует полного такта — ускоряем реакцию.
+                    tank.next_bot_command_at = now + BOT_COMMAND_SECONDS * 0.5
+                elif cmd in DIRECTIONS:
+                    self._bot_step(room, tank, cmd)
+                    tank.next_bot_command_at = now + BOT_COMMAND_SECONDS
+                else:
+                    tank.next_bot_command_at = now + BOT_COMMAND_SECONDS
         self._collect_bonuses(room)
         room.updated_at = wall
 
