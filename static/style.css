@@ -14,11 +14,10 @@ main {
   display: flex; flex-direction: column;
   padding: .8rem 1rem;
   gap: .6rem;
-  min-height: 0;        /* важно: разрешаем main сжиматься */
-  overflow: hidden;     /* поле не должно «уезжать» при большом числе игроков */
+  min-height: 0;
+  overflow: hidden;
 }
 
-/* -------- Поле: сверху, размер от ширины -------- */
 .arena {
   flex: 1;
   display: flex; flex-direction: column;
@@ -28,7 +27,6 @@ main {
 }
 #board {
   display: block;
-  /* размер в пикселях задаёт JS (fitCanvas), CSS-размер — резерв */
   width: min(100%, 100%);
   aspect-ratio: 2 / 1;
   image-rendering: pixelated;
@@ -42,10 +40,9 @@ main {
   flex-shrink: 0;
 }
 
-/* -------- Участники: снизу, фиксированная высота -------- */
 .participants {
   flex-shrink: 0;
-  height: 6.5rem;               /* не растёт от числа игроков */
+  height: 6.5rem;
   display: flex; flex-direction: column;
   background: #202c35;
   border-radius: .5rem;
@@ -86,5 +83,5 @@ main {
   header { flex-wrap: wrap; }
   main { padding: .5rem; gap: .4rem; }
   .participants { height: 5.5rem; }
-  #hint { display: none; }   /* на телефоне экономим место */
+  #hint { display: none; }
 }

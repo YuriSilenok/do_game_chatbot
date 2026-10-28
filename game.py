@@ -37,6 +37,9 @@ DIRECTIONS = {
 TILE_SIZE = 32
 BOT_COMMAND_SECONDS = 1
 PLAYER_IDLE_SECONDS = 30
+# CHANGED: длительность удержания клиента в long-poll (клиент ставит timeout 35,
+# сервер должен сам отпускать через 25, чтобы не копить «висящие» соединения).
+STATE_LONGPOLL_SECONDS = 25.0
 SHELL_EVENT_SECONDS = 0.05
 BONUS_TYPES = ("звезда", "шлем", "часы")
 
@@ -81,6 +84,8 @@ class Tank:
     frozen_until: float = 0
     last_command_at: float = field(default_factory=time.monotonic)
     next_bot_command_at: float = 0
+    # CHANGED: было ли это изначально ботом (для корректного «пробуждения»).
+    initially_bot: bool = False
 
 
 @dataclass
@@ -217,7 +222,6 @@ class Game:
         room.registrations.append(name)
         self._ensure_map(room)
 
-        # CHANGED: рандомная точка респавна среди свободных.
         spawn_points = self._spawn_points(room)
         used_cells = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
         free_points = [p for p in spawn_points if p not in used_cells]
@@ -233,6 +237,7 @@ class Game:
             x=x + 0.5,
             y=y + 0.5,
             color=self._next_color(room),
+            last_command_at=time.monotonic(),
         )
         room.tanks.append(tank)
         room.updated_at = time.time()
@@ -276,16 +281,16 @@ class Game:
         room.spawn_points = selected + remaining
         return room.spawn_points
 
-    def _best_player_kills(self, room: Room) -> int:
+    def _total_player_kills(self, room: Room) -> int:
         registered = {name.casefold() for name in room.registrations}
-        best = 0
+        total = 0
         for tank in room.tanks:
-            if tank.name.casefold() in registered and tank.kills > best:
-                best = tank.kills
-        return best
+            if tank.name.casefold() in registered:
+                total += tank.kills
+        return total
 
     def _bot_wave_interval(self, room: Room) -> float:
-        return max(1.0, BOT_WAVE_BASE_INTERVAL - self._best_player_kills(room))
+        return max(1.0, BOT_WAVE_BASE_INTERVAL - self._total_player_kills(room))
 
     def _free_spawn_cells(self, room: Room) -> list[tuple[int, int]]:
         used_cells = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
@@ -301,7 +306,6 @@ class Game:
         return fallback
 
     def _add_bot(self, room: Room) -> Tank | None:
-        # CHANGED: рандомная точка для ботов.
         free_points = self._free_spawn_cells(room)
         if free_points:
             x, y = random.choice(free_points)
@@ -324,6 +328,8 @@ class Game:
             x=x + 0.5,
             y=y + 0.5,
             color=BOT_COLOR,
+            last_command_at=time.monotonic(),
+            initially_bot=True,
         )
         room.tanks.append(tank)
         return tank
@@ -621,7 +627,10 @@ class Game:
         for tank in room.tanks:
             if not tank.alive:
                 continue
-            if not tank.is_bot and now - tank.last_command_at >= PLAYER_IDLE_SECONDS:
+            # CHANGED: если игрок простаивал — превращаем в бота, но НЕ трогаем
+            # изначальных ботов и не сбрасываем last_command_at (иначе цикл).
+            if (not tank.is_bot and not tank.initially_bot
+                    and now - tank.last_command_at >= PLAYER_IDLE_SECONDS):
                 tank.is_bot = True
                 tank.next_bot_command_at = now
             if tank.frozen_until > now:

@@ -3,9 +3,13 @@ const ctx = board.getContext("2d");
 const statusLabel = document.querySelector("#room-status");
 const hint = document.querySelector("#hint");
 const killsList = document.querySelector("#kills-list");
+
 let state = null;
-let polling = false;
 let stateVersion = null;
+let inflight = null;
+let retryDelay = 500;
+let lastRenderedVersion = -1;
+let renderScheduled = false;
 
 const TANK_COLOR_CSS = {
   "красный":    "#e6194b",
@@ -28,12 +32,6 @@ function tileColor(type) {
   return ({ 1: "#b76537", 2: "#87939a", 3: "#2474a1", 4: "#397447", 5: "#a5e7ef", 6: "#e3b837" })[type] || "#111820";
 }
 
-/**
- * Размер поля зависит ТОЛЬКО от геометрии .arena.
- * Число участников/убийств на это не влияет: .participants в CSS имеет
- * фиксированную высоту, поэтому .arena всегда получает одинаковый доступный
- * прямоугольник.
- */
 function fitCanvas() {
   const arena = board.parentElement;
   if (!arena) return false;
@@ -49,7 +47,6 @@ function fitCanvas() {
   const availableH = arenaRect.height - hintH - gapPx;
   if (availableW < 1 || availableH < 1) return false;
 
-  // 2:1 — вписываем в доступный прямоугольник по обоим измерениям.
   const cssW = Math.min(availableW, availableH * 2);
   const cssH = cssW / 2;
 
@@ -111,10 +108,7 @@ function draw() {
       for (let y = 0; y < mapHeight; y++) tiles.push(new Array(mapWidth).fill(0));
       for (const b of state.blocks) tiles[b.y][b.x] = b.type;
     }
-    if (!tiles || !tiles.length) {
-      console.error("state.map.tiles отсутствует в ответе сервера", state);
-      return;
-    }
+    if (!tiles || !tiles.length) return;
 
     if (!fitCanvas()) return;
 
@@ -230,29 +224,67 @@ function showKills(kills) {
   }
 }
 
-async function pollState() {
-  if (polling) return;
-  polling = true;
-  try {
-    const after = stateVersion == null ? "" : `?after=${stateVersion}`;
-    const response = await fetch(`/api/state${after}`);
-    if (!response.ok) throw new Error(`Сервер ответил ${response.status}`);
-    const next = await response.json();
-    state = next;
-    stateVersion = next.state_version;
+function scheduleDraw() {
+  if (renderScheduled) return;
+  renderScheduled = true;
+  requestAnimationFrame(() => {
+    renderScheduled = false;
     draw();
-    showKills(next.kills);
-    statusLabel.textContent = `Раунд идёт · танков: ${next.tanks_alive}`;
-    hint.textContent = "Команды отправляются из терминального клиента.";
-  } catch (error) {
-    statusLabel.textContent = error.message;
-    console.error("pollState:", error);
-    await new Promise(r => setTimeout(r, 1000));
-  } finally {
-    polling = false;
-  }
-  pollState();
+  });
 }
 
-window.addEventListener("resize", draw);
+async function pollState() {
+  if (inflight) return;
+  const controller = new AbortController();
+  inflight = controller;
+  try {
+    const after = stateVersion == null ? "" : `?after=${stateVersion}`;
+    const response = await fetch(`/api/state${after}`, {
+      signal: controller.signal,
+      // 30 с: сервер отпускает через 25, но подстрахуемся
+      cache: "no-store",
+      headers: { "Accept": "application/json" },
+    });
+    if (!response.ok) throw new Error(`Сервер ответил ${response.status}`);
+    const next = await response.json();
+    if (stateVersion != null && next.state_version === stateVersion) {
+      // Сервер вернул ту же версию — просто отдадим управление циклу.
+      return;
+    }
+    state = next;
+    stateVersion = next.state_version;
+    if (stateVersion !== lastRenderedVersion) {
+      lastRenderedVersion = stateVersion;
+      scheduleDraw();
+      showKills(next.kills);
+      statusLabel.textContent = `Раунд идёт · танков: ${next.tanks_alive}`;
+      hint.textContent = "Команды отправляются из терминального клиента.";
+    }
+    retryDelay = 500;
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      statusLabel.textContent = error.message;
+      console.error("pollState:", error);
+      await new Promise(r => setTimeout(r, retryDelay));
+      retryDelay = Math.min(5000, retryDelay * 2);
+    }
+  } finally {
+    if (inflight === controller) inflight = null;
+  }
+  // Планируем следующий цикл — НЕ рекурсией, а микротаском.
+  setTimeout(pollState, 0);
+}
+
+// При возврате на вкладку — сразу дёргаем обновление.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    if (inflight) {
+      inflight.abort();
+      inflight = null;
+    }
+    setTimeout(pollState, 0);
+  }
+});
+
+window.addEventListener("resize", () => scheduleDraw());
 requestAnimationFrame(() => { draw(); pollState(); });

@@ -25,9 +25,10 @@ class TankClient:
         self.request_queue = queue.Queue()
         self.result_queue = queue.Queue()
         self.stop_worker = threading.Event()
-        self.monitor_stop = threading.Event()
+        self.monitor_stop: threading.Event | None = None
         self.pressed_keys = set()
         self.player_name = ""
+        self.player_tank_id: str | None = None
         self.connected = False
 
         frame = tk.Frame(root, padx=18, pady=16)
@@ -53,8 +54,9 @@ class TankClient:
 
         self.worker = threading.Thread(target=self.request_worker, daemon=True)
         self.worker.start()
-        self.root.after(150, self.check_results)
+        self.root.after(100, self.check_results)
 
+    # ------------------------------------------------------------------
     def join(self):
         name = self.name_entry.get().strip()
         if not name:
@@ -68,6 +70,12 @@ class TankClient:
         self.join_button.configure(state="disabled")
         self.status.set("Подключение...")
         self.request_queue.put(("join", {"name": name}))
+
+    # ------------------------------------------------------------------
+    def _stop_monitor(self):
+        if self.monitor_stop is not None:
+            self.monitor_stop.set()
+            self.monitor_stop = None
 
     def request_worker(self):
         while not self.stop_worker.is_set():
@@ -84,7 +92,7 @@ class TankClient:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(request, timeout=5) as response:
+                with urllib.request.urlopen(request, timeout=6) as response:
                     body = response.read()
                 details = json.loads(body.decode("utf-8")) if body else {}
                 self.result_queue.put((action, True, details if action == "join" else ""))
@@ -100,6 +108,7 @@ class TankClient:
             finally:
                 self.request_queue.task_done()
 
+    # ------------------------------------------------------------------
     def check_results(self):
         try:
             while True:
@@ -111,7 +120,9 @@ class TankClient:
                             self.join_button.configure(state="normal")
                             self.status.set("Сервер не вернул идентификатор танка.")
                             continue
+                        self._stop_monitor()
                         self.connected = True
+                        self.player_tank_id = tank_id
                         self.name_entry.configure(state="disabled")
                         self.root.focus_set()
                         self.status.set(f"Подключено как {self.player_name}.")
@@ -126,46 +137,80 @@ class TankClient:
                         self.status.set(f"Не удалось подключиться: {detail}")
                 elif action == "dead":
                     self.connected = False
+                    self.player_tank_id = None
                     self.pressed_keys.clear()
                     self.name_entry.configure(state="normal")
                     self.join_button.configure(state="normal")
+                    self.status.set(detail)
+                elif action == "sleeping":
+                    # Игрок стал ботом по простою — не отключаем, только сообщаем.
                     self.status.set(detail)
                 elif not success:
                     self.status.set(f"Ошибка отправки команды: {detail}")
         except queue.Empty:
             pass
         if not self.stop_worker.is_set():
-            self.root.after(150, self.check_results)
+            self.root.after(100, self.check_results)
 
+    # ------------------------------------------------------------------
     def watch_tank(self, tank_id, stop_event):
         state_version = None
+        missed = 0
         while not stop_event.is_set():
             after = "" if state_version is None else f"?after={state_version}"
             request = urllib.request.Request(f"{SERVER_URL}/api/state{after}")
             try:
-                with urllib.request.urlopen(request, timeout=35) as response:
+                # Таймаут 40 с: сервер отпускает long-poll через 25 с,
+                # но подстрахуемся на случай медленного канала.
+                with urllib.request.urlopen(request, timeout=40) as response:
                     state = json.loads(response.read().decode("utf-8"))
                 state_version = state["state_version"]
-                if not any(tank["id"] == tank_id for tank in state["tanks"]):
+                tank = next(
+                    (t for t in state["tanks"] if t["id"] == tank_id),
+                    None,
+                )
+                if tank is None:
                     self.result_queue.put((
                         "dead",
                         True,
                         "Ваш танк уничтожен. Вы отключены от игры. Нажмите «Подключиться», чтобы войти снова.",
                     ))
                     return
+                if tank["is_bot"] and self.connected:
+                    self.result_queue.put((
+                        "sleeping",
+                        True,
+                        "Вы не двигались 30 с — за вас играет бот. Нажмите любую клавишу управления, чтобы вернуть контроль.",
+                    ))
+                missed = 0
             except Exception:
+                missed += 1
+                # Не спамим — при 5 подряд ошибках считаем связь потерянной.
+                if missed >= 5:
+                    self.result_queue.put((
+                        "dead",
+                        True,
+                        "Связь с сервером потеряна. Нажмите «Подключиться», чтобы войти снова.",
+                    ))
+                    return
                 if stop_event.wait(1):
                     return
 
+    # ------------------------------------------------------------------
     def on_key_press(self, event):
         key = event.keysym.lower()
         command = COMMANDS.get(key)
-        if command is None or not self.connected or self.root.focus_get() == self.name_entry:
+        if command is None or not self.connected:
+            return
+        if self.root.focus_get() == self.name_entry:
             return
         if key in self.pressed_keys:
             return "break"
         self.pressed_keys.add(key)
-        self.request_queue.put(("command", {"sender": self.player_name, "command": command}))
+        self.request_queue.put((
+            "command",
+            {"sender": self.player_name, "command": command},
+        ))
         return "break"
 
     def on_key_release(self, event):
@@ -174,9 +219,10 @@ class TankClient:
             self.pressed_keys.discard(key)
             return "break"
 
+    # ------------------------------------------------------------------
     def close(self):
         self.stop_worker.set()
-        self.monitor_stop.set()
+        self._stop_monitor()
         self.root.destroy()
 
 

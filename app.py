@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from game import game
+from game import STATE_LONGPOLL_SECONDS, game
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -32,14 +32,23 @@ app = FastAPI(title="Танковый чат")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 
+def _bump_version() -> None:
+    """Увеличивает версию состояния — вызывается под глобальным локом."""
+    game.room.state_version += 1
+
+
 async def publish_room_event() -> None:
+    """
+    Публикует событие: увеличивает версию и будит long-poll'ы.
+    Всё внутри `async with state_condition`, чтобы не было гонки
+    «notify раньше, чем wait».
+    """
     global room_task
-    room = game.room
-    room.state_version += 1
-    if room_task is None or room_task.done():
-        room_task = asyncio.create_task(room_event_loop())
-    room_wakeup.set()
     async with state_condition:
+        _bump_version()
+        if room_task is None or room_task.done():
+            room_task = asyncio.create_task(room_event_loop())
+        room_wakeup.set()
         state_condition.notify_all()
 
 
@@ -53,9 +62,9 @@ async def room_event_loop() -> None:
             else:
                 await asyncio.wait_for(room_wakeup.wait(), timeout=max(delay, 0.001))
         except asyncio.TimeoutError:
-            game.process_room_events(game.room)
-            game.room.state_version += 1
             async with state_condition:
+                game.process_room_events(game.room)
+                _bump_version()
                 state_condition.notify_all()
 
 
@@ -100,7 +109,7 @@ async def send_command(payload: CommandRequest):
     if tank is None:
         raise HTTPException(status_code=409, detail="Танк не найден или уничтожен.")
 
-    # Если танк управлялся ботом — «будим» игрока.
+    # «Пробуждаем» игрока, даже если он стал ботом по простою.
     tank.is_bot = False
     tank.last_command_at = time.monotonic()
     tank.next_bot_command_at = 0
@@ -113,7 +122,28 @@ async def send_command(payload: CommandRequest):
 @app.get("/api/state")
 async def room_state(after: Optional[int] = Query(default=None, ge=0)):
     room = game.room
-    if after is not None and room.state_version == after:
-        async with state_condition:
-            await state_condition.wait_for(lambda: room.state_version != after)
+
+    # Если клиент запрашивает «после той же версии» — ждём новую,
+    # но НЕ дольше STATE_LONGPOLL_SECONDS, чтобы соединение не висело.
+    if after is not None:
+        try:
+            async with state_condition:
+                if room.state_version == after:
+                    try:
+                        await asyncio.wait_for(
+                            state_condition.wait_for(
+                                lambda: room.state_version != after
+                            ),
+                            timeout=STATE_LONGPOLL_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        pass  # отдадим текущее состояние — клиент переподключится
+        except asyncio.CancelledError:
+            raise
+
+    # Симулируем «в момент запроса», чтобы клиент не получал устаревшее
+    # состояние (танк, который уже должен быть мёртв, но ещё жив в снапшоте).
+    async with state_condition:
+        game.process_room_events(room)
+
     return game.room_state(room)
