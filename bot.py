@@ -1,17 +1,14 @@
 # bot.py
 """
-Максимально агрессивный ИИ-бот. Охотится за лидером по убийствам.
+Агрессивный ИИ-бот. Ровно 4 действия в секунду.
 
-Главное правило: бот стреляет ТОЛЬКО когда цель находится на линии
-выстрела (одна ось + нет блокеров между). Во всех остальных случаях —
-только ходьба по A*.
-
-Технически:
-  * /api/state без after — мгновенный ответ, без long-poll.
-  * Команды в отдельной корутине.
-  * Оптимистичное применение команды к локальной копии.
-  * A* ищет путь к клетке цели; кирпичи в A* непроходимы,
-    потому что бот не должен стрелять в стены.
+Правила:
+  * Одно действие в 0.25 секунды — не чаще (движение, поворот или выстрел).
+  * Стреляет ТОЛЬКО если цель на линии видимости (одна ось + нет блокеров).
+  * Цель — живой игрок с максимумом убийств; при равенстве — ближайший.
+  * Иначе — A* к клетке цели (кирпичи считаются стеной, чтобы не было
+    «выстрелов в стены»).
+  * Sticky target — не переключается с лидера из-за одного кадра.
 """
 
 from __future__ import annotations
@@ -27,7 +24,9 @@ import aiohttp
 BASE_URL = "http://0.0.0.0:8080"
 BOT_NAME = "Бот-Охотник"
 
-COMMAND_COOLDOWN = 0.02
+# Ровно 4 действия в секунду → 0.25 с между командами.
+ACTIONS_PER_SECOND = 4
+COMMAND_COOLDOWN = 1.0 / ACTIONS_PER_SECOND  # = 0.25
 
 
 DIRECTIONS = {
@@ -92,7 +91,7 @@ def manhattan(a, b) -> int:
 
 
 # ---------------------------------------------------------------------------
-# A* (кирпичи непроходимы: бот не стреляет в стены)
+# A* (кирпичи непроходимы)
 # ---------------------------------------------------------------------------
 def a_star_next_step(
     tiles,
@@ -101,12 +100,6 @@ def a_star_next_step(
     blocked: set[tuple[int, int]],
     max_nodes: int = 3000,
 ) -> Optional[str]:
-    """
-    A* от start до goal. Кирпичи — стена (не проходим, не стреляем).
-    Проходимые: 0, 3, 5. Сталь/вода/бетон — стена.
-    Другие танки (blocked) — стена (кроме goal).
-    Возвращает первое направление шага или None.
-    """
     if start == goal:
         return None
 
@@ -138,9 +131,7 @@ def a_star_next_step(
                 continue
             if (nx, ny) in closed:
                 continue
-
             tile = tiles[ny][nx]
-            # Кирпич = стена для этого бота.
             if tile not in PASSABLE_TILES:
                 continue
             if (nx, ny) in blocked and (nx, ny) != goal:
@@ -314,7 +305,6 @@ class BotClient:
 
     # -- выбор цели ------------------------------------------------------
     def _pick_target(self):
-        """Лидер по убийствам; при равенстве — ближайший. Sticky."""
         if not self.state.enemies:
             self._sticky_target_name = None
             return None
@@ -354,7 +344,7 @@ class BotClient:
             return d
         return "выстрел"
 
-    # -- главное решение ------------------------------------------------
+    # -- главное решение: одно действие на такт --------------------------
     def _choose_command(self) -> Optional[str]:
         me = self.state.me
         if me is None or not self.state.tiles:
@@ -372,30 +362,25 @@ class BotClient:
         if cmd is not None:
             return cmd
 
-        # 2. Не на линии — только A*-ходьба. Никаких выстрелов в стены.
+        # 2. Не на линии — только A*-шаг. Кирпичи не ломаем.
         blocked = self.state.blocked - {my_cell}
         step = a_star_next_step(self.state.tiles, my_cell, target_cell, blocked)
         if step is not None:
             return step
 
-        # 3. Прямой путь к клетке цели закрыт (например, другой бот) —
-        #    идём к любой соседней с целью клетке.
+        # 3. Прямой путь к клетке цели закрыт — к соседней клетке.
         goals = set()
         for _, (dx, dy) in DIRECTIONS.items():
             cell = (target_cell[0] + dx, target_cell[1] + dy)
             if tile_at(self.state.tiles, *cell) in PASSABLE_TILES and cell not in blocked:
                 goals.add(cell)
-        if goals:
-            step = a_star_next_step(self.state.tiles, my_cell, next(iter(goals)), blocked)
+        for g in goals:
+            step = a_star_next_step(self.state.tiles, my_cell, g, blocked)
             if step is not None:
                 return step
-            for g in goals:
-                step = a_star_next_step(self.state.tiles, my_cell, g, blocked)
-                if step is not None:
-                    return step
         return None
 
-    # -- основной шаг ----------------------------------------------------
+    # -- такт: одно действие не чаще, чем раз в 0.25 с -------------------
     def _decide(self):
         now = time.monotonic()
         if now - self._last_command_at < COMMAND_COOLDOWN:
@@ -414,16 +399,20 @@ class BotClient:
 
         self.state.apply_command(command)
         self._last_command = command
-        if self._command_queue.qsize() < 8:
+        # Держим очередь короткой — команда должна уйти сразу.
+        if self._command_queue.qsize() < 2:
             self._command_queue.put_nowait(command)
 
     async def _decision_loop(self):
+        # Спим ровно остаток такта, а не крутимся на sleep(0).
         while True:
             try:
                 self._decide()
             except Exception as exc:
                 print(f"[bot] decide error: {exc}")
-            await asyncio.sleep(0)
+            elapsed = time.monotonic() - self._last_command_at
+            sleep_for = max(0.0, COMMAND_COOLDOWN - elapsed)
+            await asyncio.sleep(sleep_for if sleep_for > 0 else 0.01)
 
     # -- регистрация -----------------------------------------------------
     async def _join_loop(self):
