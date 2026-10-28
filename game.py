@@ -41,7 +41,7 @@ STATE_LONGPOLL_SECONDS = 25.0
 SHELL_EVENT_SECONDS = 0.05
 BONUS_TYPES = ("звезда", "шлем", "часы")
 
-# Ровно столько ботов в комнате, респавн через BOT_RESPAWN_SECONDS.
+# Ровно 5 ботов в комнате, респавн через 5 секунд.
 BOT_TARGET_COUNT = 5
 BOT_RESPAWN_SECONDS = 5.0
 
@@ -84,7 +84,6 @@ class Tank:
     last_command_at: float = field(default_factory=time.monotonic)
     next_bot_command_at: float = 0
     initially_bot: bool = False
-    # Ботов не удаляем — они «мёртвые» лежат с этим моментом.
     respawn_at: float = 0
 
 
@@ -280,7 +279,7 @@ class Game:
         return room.spawn_points
 
     # ------------------------------------------------------------------
-    # Боты: ровно BOT_TARGET_COUNT штук, респавн через BOT_RESPAWN_SECONDS
+    # Боты: ровно BOT_TARGET_COUNT, респавн через BOT_RESPAWN_SECONDS
     # ------------------------------------------------------------------
     def _free_spawn_cells(self, room: Room) -> list[tuple[int, int]]:
         used_cells = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
@@ -328,7 +327,6 @@ class Game:
         return tank
 
     def _ensure_bot_count(self, room: Room) -> None:
-        """Доводит число живых ботов до BOT_TARGET_COUNT."""
         alive_bots = sum(1 for t in room.tanks if t.alive and t.is_bot)
         need = BOT_TARGET_COUNT - alive_bots
         for _ in range(need):
@@ -336,7 +334,6 @@ class Game:
                 break
 
     def _process_bot_respawns(self, room: Room, now: float) -> None:
-        """Возрождает мёртвых ботов, у которых истёк respawn_at."""
         for tank in room.tanks:
             if not tank.is_bot or tank.alive:
                 continue
@@ -344,7 +341,6 @@ class Game:
                 continue
             cell = self._random_free_cell(room)
             if cell is None:
-                # Нет места — попробуем в следующий тик.
                 continue
             x, y = cell
             tank.alive = True
@@ -365,8 +361,6 @@ class Game:
     def start_round(self, room: Room) -> None:
         self._ensure_map(room)
         room.bonuses = []
-
-        # Игроков оставляем живых, ботов — удаляем и создадим заново ровно N.
         room.tanks = [t for t in room.tanks if not t.is_bot and t.alive]
         room.next_bot_index = 1
         self._ensure_bot_count(room)
@@ -494,7 +488,6 @@ class Game:
                     owner = next((t for t in room.tanks if t.id == s.owner_id), None)
                     if owner is not None and owner.name.casefold() in registered_names:
                         owner.kills += 1
-                    # Мёртвому боту назначаем время респавна.
                     if target.is_bot:
                         target.respawn_at = time.monotonic() + BOT_RESPAWN_SECONDS
                     if random.random() < 0.3:
@@ -509,8 +502,6 @@ class Game:
         for tank in room.tanks:
             tank.shells[:] = [s for s in tank.shells if s.id not in destroyed]
 
-        # Игроков-мертвецов убираем из комнаты (как раньше).
-        # Ботов НЕ удаляем — они ждут respawn_at.
         dead_players = {
             t.name.casefold()
             for t in room.tanks
@@ -546,14 +537,10 @@ class Game:
         room.bonuses = kept
 
     # ------------------------------------------------------------------
-    # Логика ботов: охота на игрока с максимумом убийств
+    # Логика ботов: цель — лидер по убийствам, стрельба ТОЛЬКО по линии
     # ------------------------------------------------------------------
     def _bot_target(self, room: Room, tank: Tank) -> Tank | None:
-        """
-        Цель бота — живой ИГРОК с максимальным числом убийств.
-        При равенстве kills — ближайший к боту.
-        Если игроков нет — None (бот стоит).
-        """
+        """Живой игрок с максимумом убийств; при равенстве — ближайший."""
         registered = {n.casefold() for n in room.registrations}
         candidates = [
             t for t in room.tanks
@@ -561,37 +548,16 @@ class Game:
         ]
         if not candidates:
             return None
-        # Максимум kills, затем минимум расстояния.
         return min(
             candidates,
             key=lambda t: (-t.kills, (t.x - tank.x) ** 2 + (t.y - tank.y) ** 2),
         )
 
-    def _brick_command(self, room, tank, my_cell, blocked) -> str | None:
-        tiles = room.tiles
-        best: tuple[int, str] | None = None
-        for direction, (dx, dy) in DIRECTIONS.items():
-            x, y = my_cell
-            dist = 0
-            while True:
-                x += dx; y += dy; dist += 1
-                if not (0 <= x < MAP_WIDTH and 0 <= y < MAP_HEIGHT):
-                    break
-                tile = tiles[y][x]
-                if tile == 1:
-                    if best is None or dist < best[0]:
-                        best = (dist, direction)
-                    break
-                if tile in (2, 4, 6):
-                    break
-                if (x, y) in blocked:
-                    break
-        if best is not None:
-            direction = best[1]
-            return direction if tank.direction != direction else "выстрел"
-        return None
-
-    def _bot_command(self, room, tank) -> str | None:
+    def _bot_command(self, room: Room, tank: Tank) -> str | None:
+        """
+        Бот стреляет ТОЛЬКО если цель на линии видимости (нет блокеров)
+        и на одной оси. Иначе — BFS-шаг к клетке цели (без разрушения стен).
+        """
         target = self._bot_target(room, tank)
         if target is None:
             return None
@@ -601,23 +567,18 @@ class Game:
         target_cell = (int(target.x), int(target.y))
         blocked = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
 
-        # 1. Цель на линии видимости — разворот и выстрел.
+        # 1. Цель на линии видимости — разворот/выстрел.
         if _line_of_sight(tiles, my_cell, target_cell):
             d = _direction_between(my_cell, target_cell)
             if d is not None:
                 return d if tank.direction != d else "выстрел"
 
-        # 2. Кирпич на пути — пробиваем.
-        bc = self._brick_command(room, tank, my_cell, blocked)
-        if bc is not None:
-            return bc
-
-        # 3. Идём к цели напрямую.
+        # 2. Не на линии — только идём к цели. Кирпичи НЕ трогаем.
         step = _bfs_next_step(tiles, my_cell, {target_cell}, blocked - {my_cell})
         if step is not None:
             return step
 
-        # 4. Запасной вариант — соседние с целью клетки.
+        # 3. Прямой путь к клетке цели закрыт — идём к соседним клеткам.
         goals = set()
         for _, (dx, dy) in DIRECTIONS.items():
             cell = (target_cell[0] + dx, target_cell[1] + dy)
@@ -662,9 +623,7 @@ class Game:
         if room.phase != "round":
             return
 
-        # 1) Респавн мёртвых ботов через BOT_RESPAWN_SECONDS.
         self._process_bot_respawns(room, now)
-        # 2) Досоздать ботов, если их меньше BOT_TARGET_COUNT (старт, потери).
         self._ensure_bot_count(room)
 
         self._move_shells(room, elapsed)

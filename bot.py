@@ -1,17 +1,17 @@
 # bot.py
 """
-Максимально агрессивный ИИ-бот на A*.
+Максимально агрессивный ИИ-бот. Охотится за лидером по убийствам.
 
-Принципы:
-  1. Цель — живой игрок с максимумом убийств (лидер). Если лидер умер —
-     мгновенное переключение на следующего.
-  2. Если цель в зоне видимости — разворот и выстрел, БЕЗ ходьбы.
-  3. Иначе — A* до клетки цели. Кирпичи включены в граф со штрафом:
-     A* сам решит, пробивать стену или обойти.
-  4. Если A* вернул шаг в стену — бот разворачивается и стреляет.
-  5. Если шаг не меняет клетку (застрял) — повторный A* с более
-     высоким штрафом за кирпичи принудительно ищет обход.
-  6. Все команды идут через очередь; состояние обновляется непрерывно.
+Главное правило: бот стреляет ТОЛЬКО когда цель находится на линии
+выстрела (одна ось + нет блокеров между). Во всех остальных случаях —
+только ходьба по A*.
+
+Технически:
+  * /api/state без after — мгновенный ответ, без long-poll.
+  * Команды в отдельной корутине.
+  * Оптимистичное применение команды к локальной копии.
+  * A* ищет путь к клетке цели; кирпичи в A* непроходимы,
+    потому что бот не должен стрелять в стены.
 """
 
 from __future__ import annotations
@@ -27,12 +27,7 @@ import aiohttp
 BASE_URL = "http://0.0.0.0:8080"
 BOT_NAME = "Бот-Охотник"
 
-# Минимальная защита от дублирования. Чем меньше — тем быстрее реакция.
 COMMAND_COOLDOWN = 0.02
-# Штраф за проход через клетку с кирпичом в A*.
-BRICK_COST = 6
-# Дополнительный штраф, если бот «застрял» (шаг не изменил клетку).
-STUCK_EXTRA_BRICK_COST = 20
 
 
 DIRECTIONS = {
@@ -42,11 +37,11 @@ DIRECTIONS = {
     "вправо": (1, 0),
 }
 
-BLOCKING_TILES = {1, 2, 4, 6}     # блокируют обзор и движение
-PASSABLE_TILES = {0, 3, 5}        # обычные проходимые
+BLOCKING_TILES = {1, 2, 4, 6}
+PASSABLE_TILES = {0, 3, 5}
 BRICK_TILE = 1
-WATER_TILE = 4
 STEEL_TILE = 2
+WATER_TILE = 4
 CONCRETE_TILE = 6
 
 
@@ -86,6 +81,7 @@ def direction_between(src, dst) -> Optional[str]:
 
 
 def shoot_direction(tiles, src, dst) -> Optional[str]:
+    """Направление выстрела, если цель на линии и видна."""
     if not line_of_sight(tiles, src, dst):
         return None
     return direction_between(src, dst)
@@ -96,25 +92,19 @@ def manhattan(a, b) -> int:
 
 
 # ---------------------------------------------------------------------------
-# A* поиск пути
+# A* (кирпичи непроходимы: бот не стреляет в стены)
 # ---------------------------------------------------------------------------
 def a_star_next_step(
     tiles,
     start: tuple[int, int],
     goal: tuple[int, int],
     blocked: set[tuple[int, int]],
-    brick_cost: int = BRICK_COST,
-    max_nodes: int = 2000,
+    max_nodes: int = 3000,
 ) -> Optional[str]:
     """
-    A* от start до goal.
-
-    Проходимые клетки: 0, 3, 5 — стоимость 1.
-    Кирпич (1) — проходим за brick_cost (по умолчанию 6).
-    Сталь (2), вода (4), бетон (6) — непроходимы.
-    Клетки из blocked (другие танки) — непроходимы (обход).
-    start/goal исключаются из blocked на стороне вызова.
-
+    A* от start до goal. Кирпичи — стена (не проходим, не стреляем).
+    Проходимые: 0, 3, 5. Сталь/вода/бетон — стена.
+    Другие танки (blocked) — стена (кроме goal).
     Возвращает первое направление шага или None.
     """
     if start == goal:
@@ -123,20 +113,15 @@ def a_star_next_step(
     h = len(tiles)
     w = len(tiles[0])
 
-    # Очередь: (f, tie, g, cell, first_dir)
     open_heap: list[tuple[int, int, int, tuple[int, int], Optional[str]]] = []
     counter = 0
     g_score: dict[tuple[int, int], int] = {start: 0}
-    heapq.heappush(
-        open_heap,
-        (manhattan(start, goal), counter, 0, start, None),
-    )
-
+    heapq.heappush(open_heap, (manhattan(start, goal), counter, 0, start, None))
     closed: set[tuple[int, int]] = set()
     nodes = 0
 
     while open_heap:
-        f, _, g, cell, first_dir = heapq.heappop(open_heap)
+        _f, _tie, g, cell, first_dir = heapq.heappop(open_heap)
         if cell == goal:
             return first_dir
         if cell in closed:
@@ -155,22 +140,13 @@ def a_star_next_step(
                 continue
 
             tile = tiles[ny][nx]
-            # Непроходимые
-            if tile in (STEEL_TILE, WATER_TILE, CONCRETE_TILE):
+            # Кирпич = стена для этого бота.
+            if tile not in PASSABLE_TILES:
                 continue
-            # Другие танки
             if (nx, ny) in blocked and (nx, ny) != goal:
                 continue
 
-            # Стоимость входа в клетку
-            if tile == BRICK_TILE:
-                step_cost = brick_cost
-            elif tile in PASSABLE_TILES:
-                step_cost = 1
-            else:
-                continue
-
-            tentative_g = g + step_cost
+            tentative_g = g + 1
             if tentative_g < g_score.get((nx, ny), 10 ** 9):
                 g_score[(nx, ny)] = tentative_g
                 counter += 1
@@ -271,12 +247,7 @@ class BotClient:
         self._command_queue: asyncio.Queue[str] = asyncio.Queue()
         self._last_command_at = 0.0
         self._last_command: Optional[str] = None
-        # Запоминаем, в какой клетке стояли в прошлом такте — для детекта «застрял».
-        self._last_cell: Optional[tuple[int, int]] = None
-        # Текущая цель (name игрока) — чтобы не переключаться из-за кадров.
         self._sticky_target_name: Optional[str] = None
-        # Счётчик подряд застрявших шагов.
-        self._stuck: int = 0
 
     async def __aenter__(self):
         connector = aiohttp.TCPConnector(limit=8, ttl_dns_cache=300)
@@ -351,12 +322,10 @@ class BotClient:
         if me is None:
             return None
 
-        # Если sticky-цель жива и всё ещё лидер — оставляем её.
         if self._sticky_target_name is not None:
             same = [e for e in self.state.enemies
                     if e["name"] == self._sticky_target_name]
             if same:
-                # проверяем, что никто не обогнал по kills
                 max_kills = max(int(e.get("kills", 0)) for e in self.state.enemies)
                 if int(same[0].get("kills", 0)) >= max_kills:
                     return same[0]
@@ -372,8 +341,8 @@ class BotClient:
         self._sticky_target_name = target["name"]
         return target
 
-    # -- проверка линии видимости ---------------------------------------
-    def _shoot_at(self, target_cell):
+    # -- выстрел ТОЛЬКО по линии ----------------------------------------
+    def _shoot_at(self, target_cell) -> Optional[str]:
         me = self.state.me
         if me is None:
             return None
@@ -384,51 +353,6 @@ class BotClient:
         if me["direction"] != d:
             return d
         return "выстрел"
-
-    # -- путь -----------------------------------------------------------
-    def _path_step(self, target_cell):
-        me = self.state.me
-        if me is None:
-            return None
-        my_cell = (int(me["x"]), int(me["y"]))
-        blocked = self.state.blocked - {my_cell}
-
-        # Обычный A*: кирпичи можно ломать, но с штрафом.
-        step = a_star_next_step(
-            self.state.tiles,
-            my_cell,
-            target_cell,
-            blocked,
-            brick_cost=BRICK_COST,
-        )
-        if step is not None:
-            return step
-
-        # Если A* не нашёл маршрут — принудительно обходить стены.
-        # Увеличиваем штраф, чтобы A* искал длинный, но проходимый путь.
-        step = a_star_next_step(
-            self.state.tiles,
-            my_cell,
-            target_cell,
-            blocked,
-            brick_cost=STUCK_EXTRA_BRICK_COST,
-            max_nodes=3000,
-        )
-        return step
-
-    def _should_shoot_brick(self, step: str, target_cell) -> bool:
-        """
-        Если A* вернул шаг, но соседняя клетка — кирпич, выгоднее
-        выстрелить в него, а не биться. Возвращает True, если шаг
-        ведёт в кирпич.
-        """
-        me = self.state.me
-        if me is None:
-            return False
-        dx, dy = DIRECTIONS[step]
-        nx, ny = int(me["x"]) + dx, int(me["y"]) + dy
-        tile = tile_at(self.state.tiles, nx, ny)
-        return tile == BRICK_TILE
 
     # -- главное решение ------------------------------------------------
     def _choose_command(self) -> Optional[str]:
@@ -443,46 +367,32 @@ class BotClient:
         target_cell = (int(target["x"]), int(target["y"]))
         my_cell = (int(me["x"]), int(me["y"]))
 
-        # 1. Линия видимости — поворот/выстрел без ходьбы.
+        # 1. Единственный случай выстрела: цель на линии видимости.
         cmd = self._shoot_at(target_cell)
         if cmd is not None:
             return cmd
 
-        # 2. Стоим рядом с целью, но не на линии — пробуем шагнуть на линию.
-        if my_cell == target_cell:
-            # Стоим буквально на клетке цели (танк на танке) — выстрел
-            # в сторону ближайшей свободной линии.
-            for direction in DIRECTIONS:
-                dx, dy = DIRECTIONS[direction]
-                if tile_at(self.state.tiles, target_cell[0] + dx, target_cell[1] + dy) in PASSABLE_TILES:
-                    return direction
-            return "выстрел"
-
-        # 3. A* до клетки цели.
-        step = self._path_step(target_cell)
-
-        # 4. Если шаг ведёт в кирпич — стреляем в него.
-        if step is not None and self._should_shoot_brick(step, target_cell):
-            if me["direction"] != step:
-                return step
-            return "выстрел"
-
+        # 2. Не на линии — только A*-ходьба. Никаких выстрелов в стены.
+        blocked = self.state.blocked - {my_cell}
+        step = a_star_next_step(self.state.tiles, my_cell, target_cell, blocked)
         if step is not None:
             return step
 
-        # 5. Совсем нет маршрута — палим в ближайшую стену по оси цели.
-        for direction, (dx, dy) in DIRECTIONS.items():
-            x, y = my_cell
-            while True:
-                x += dx
-                y += dy
-                if not (0 <= x < len(self.state.tiles[0]) and 0 <= y < len(self.state.tiles)):
-                    break
-                tile = self.state.tiles[y][x]
-                if tile == BRICK_TILE:
-                    return direction if me["direction"] != direction else "выстрел"
-                if tile in (STEEL_TILE, WATER_TILE, CONCRETE_TILE):
-                    break
+        # 3. Прямой путь к клетке цели закрыт (например, другой бот) —
+        #    идём к любой соседней с целью клетке.
+        goals = set()
+        for _, (dx, dy) in DIRECTIONS.items():
+            cell = (target_cell[0] + dx, target_cell[1] + dy)
+            if tile_at(self.state.tiles, *cell) in PASSABLE_TILES and cell not in blocked:
+                goals.add(cell)
+        if goals:
+            step = a_star_next_step(self.state.tiles, my_cell, next(iter(goals)), blocked)
+            if step is not None:
+                return step
+            for g in goals:
+                step = a_star_next_step(self.state.tiles, my_cell, g, blocked)
+                if step is not None:
+                    return step
         return None
 
     # -- основной шаг ----------------------------------------------------
@@ -496,14 +406,6 @@ class BotClient:
         if not self.state.enemies:
             return
 
-        # Детект «застрял»: если в прошлом такте клетка не изменилась.
-        cur_cell = (int(me["x"]), int(me["y"]))
-        if self._last_cell is not None and cur_cell == self._last_cell:
-            self._stuck += 1
-        else:
-            self._stuck = 0
-        self._last_cell = cur_cell
-
         command = self._choose_command()
         if command is None:
             return
@@ -512,7 +414,6 @@ class BotClient:
 
         self.state.apply_command(command)
         self._last_command = command
-
         if self._command_queue.qsize() < 8:
             self._command_queue.put_nowait(command)
 
