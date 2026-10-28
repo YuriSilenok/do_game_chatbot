@@ -2,40 +2,89 @@
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body { margin: 0; display: flex; flex-direction: column; min-height: 100vh; }
+
 header {
   display: flex; align-items: center; gap: 1.5rem;
   padding: .8rem 1.5rem; background: #202c35; flex-shrink: 0;
 }
 h1 { margin: 0; font-size: 1.35rem; }
-main { flex: 1; display: flex; flex-direction: column; padding: 1rem; min-height: 0; }
+
+main {
+  flex: 1;
+  display: flex; flex-direction: column;
+  padding: .8rem 1rem;
+  gap: .6rem;
+  min-height: 0;        /* важно: разрешаем main сжиматься */
+  overflow: hidden;     /* поле не должно «уезжать» при большом числе игроков */
+}
+
+/* -------- Поле: сверху, размер от ширины -------- */
 .arena {
   flex: 1;
   display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  gap: .6rem;
+  align-items: center; justify-content: flex-start;
   min-height: 0; min-width: 0;
   width: 100%;
 }
 #board {
   display: block;
+  /* размер в пикселях задаёт JS (fitCanvas), CSS-размер — резерв */
+  width: min(100%, 100%);
+  aspect-ratio: 2 / 1;
   image-rendering: pixelated;
   background: #080d10;
-  /* размер задаёт JS через fitCanvas() */
 }
-#hint { text-align: center; color: #bac7ce; margin: 0; flex-shrink: 0; }
-.stats {
-  width: min(100%, 900px);
-  background: #202c35; border-radius: .5rem;
-  padding: .6rem 1rem; flex-shrink: 0;
+#hint {
+  margin: .4rem 0 0;
+  text-align: center;
+  color: #bac7ce;
+  font-size: .9rem;
+  flex-shrink: 0;
 }
-.stats h2 { margin: 0 0 .4rem; font-size: 1rem; color: #cdd9df; }
-.stats ol { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: .3rem .8rem; }
-.stats li { display: flex; justify-content: space-between; gap: .6rem; padding: .25rem .4rem; background: #111820; border-radius: .25rem; }
-.stats li.empty { justify-content: center; color: #7d8a93; background: transparent; }
-.stats li strong { color: #ffe96d; }
+
+/* -------- Участники: снизу, фиксированная высота -------- */
+.participants {
+  flex-shrink: 0;
+  height: 6.5rem;               /* не растёт от числа игроков */
+  display: flex; flex-direction: column;
+  background: #202c35;
+  border-radius: .5rem;
+  padding: .5rem .8rem;
+  overflow: hidden;
+}
+.participants h2 {
+  margin: 0 0 .35rem;
+  font-size: .95rem;
+  color: #cdd9df;
+  flex-shrink: 0;
+}
+#kills-list {
+  list-style: none;
+  margin: 0; padding: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: .3rem .6rem;
+  align-content: start;
+  min-height: 0;
+}
+#kills-list li {
+  display: flex; justify-content: space-between; gap: .6rem;
+  padding: .2rem .45rem;
+  background: #111820;
+  border-radius: .25rem;
+  font-size: .9rem;
+}
+#kills-list li.empty {
+  justify-content: center;
+  color: #7d8a93;
+  background: transparent;
+}
+#kills-list li strong { color: #ffe96d; }
 
 @media (max-width: 760px) {
   header { flex-wrap: wrap; }
-  main { padding: .5rem; }
-  .stats { width: 100%; }
+  main { padding: .5rem; gap: .4rem; }
+  .participants { height: 5.5rem; }
+  #hint { display: none; }   /* на телефоне экономим место */
 }

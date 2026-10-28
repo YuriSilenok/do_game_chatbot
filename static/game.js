@@ -28,24 +28,31 @@ function tileColor(type) {
   return ({ 1: "#b76537", 2: "#87939a", 3: "#2474a1", 4: "#397447", 5: "#a5e7ef", 6: "#e3b837" })[type] || "#111820";
 }
 
-// --- Подгонка холста под доступную область (без опоры на CSS aspect-ratio) ---
+/**
+ * Размер поля зависит ТОЛЬКО от геометрии .arena.
+ * Число участников/убийств на это не влияет: .participants в CSS имеет
+ * фиксированную высоту, поэтому .arena всегда получает одинаковый доступный
+ * прямоугольник.
+ */
 function fitCanvas() {
   const arena = board.parentElement;
   if (!arena) return false;
   const arenaRect = arena.getBoundingClientRect();
   if (arenaRect.width < 1 || arenaRect.height < 1) return false;
 
-  const stats = arena.querySelector(".stats");
   const hintEl = arena.querySelector("#hint");
-  const gapPx = 10;
-  const statsH = stats ? stats.getBoundingClientRect().height : 0;
-  const hintH = hintEl ? hintEl.getBoundingClientRect().height : 0;
-  const availableH = arenaRect.height - statsH - hintH - gapPx * 2;
-  const availableW = arenaRect.width;
-  if (availableH < 1 || availableW < 1) return false;
+  const hintVisible = hintEl && getComputedStyle(hintEl).display !== "none";
+  const hintH = hintVisible ? hintEl.getBoundingClientRect().height : 0;
+  const gapPx = hintVisible ? 8 : 0;
 
+  const availableW = arenaRect.width;
+  const availableH = arenaRect.height - hintH - gapPx;
+  if (availableW < 1 || availableH < 1) return false;
+
+  // 2:1 — вписываем в доступный прямоугольник по обоим измерениям.
   const cssW = Math.min(availableW, availableH * 2);
   const cssH = cssW / 2;
+
   const dpr = window.devicePixelRatio || 1;
   const pixelsW = Math.max(1, Math.round(cssW * dpr));
   const pixelsH = Math.max(1, Math.round(cssH * dpr));
@@ -98,7 +105,6 @@ function draw() {
     const mapWidth = mapInfo.width || 26;
     const mapHeight = mapInfo.height || 13;
 
-    // Новый формат: state.map.tiles. Резерв: state.blocks (старый сервер).
     let tiles = Array.isArray(mapInfo.tiles) ? mapInfo.tiles : null;
     if (!tiles && Array.isArray(state.blocks)) {
       tiles = [];
@@ -249,5 +255,4 @@ async function pollState() {
 }
 
 window.addEventListener("resize", draw);
-// Первый draw после layout.
 requestAnimationFrame(() => { draw(); pollState(); });
