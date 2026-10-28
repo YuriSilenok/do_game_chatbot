@@ -6,10 +6,13 @@ const killsList = document.querySelector("#kills-list");
 
 let state = null;
 let stateVersion = null;
-let inflight = null;
-let retryDelay = 500;
 let lastRenderedVersion = -1;
-let renderScheduled = false;
+
+// Управление циклом
+let polling = false;
+let inflightController = null;
+let retryDelay = 500;      // ms; растёт при ошибках, сбрасывается при успехе
+let stopped = false;
 
 const TANK_COLOR_CSS = {
   "красный":    "#e6194b",
@@ -224,67 +227,112 @@ function showKills(kills) {
   }
 }
 
-function scheduleDraw() {
-  if (renderScheduled) return;
-  renderScheduled = true;
-  requestAnimationFrame(() => {
-    renderScheduled = false;
-    draw();
-  });
-}
+// ---------------------------------------------------------------------------
+// Сетевой цикл
+// ---------------------------------------------------------------------------
 
-async function pollState() {
-  if (inflight) return;
+async function fetchStateOnce() {
   const controller = new AbortController();
-  inflight = controller;
+  inflightController = controller;
+
+  // Страховочный таймаут: сервер отпускает long-poll за 25 с,
+  // но если сеть «залипла» — рвём через 30 с.
+  const timeoutId = setTimeout(() => controller.abort("timeout"), 30000);
+
   try {
     const after = stateVersion == null ? "" : `?after=${stateVersion}`;
     const response = await fetch(`/api/state${after}`, {
       signal: controller.signal,
-      // 30 с: сервер отпускает через 25, но подстрахуемся
       cache: "no-store",
       headers: { "Accept": "application/json" },
     });
-    if (!response.ok) throw new Error(`Сервер ответил ${response.status}`);
-    const next = await response.json();
-    if (stateVersion != null && next.state_version === stateVersion) {
-      // Сервер вернул ту же версию — просто отдадим управление циклу.
-      return;
+    if (!response.ok) {
+      throw new Error(`Сервер ответил ${response.status}`);
     }
-    state = next;
-    stateVersion = next.state_version;
-    if (stateVersion !== lastRenderedVersion) {
-      lastRenderedVersion = stateVersion;
-      scheduleDraw();
-      showKills(next.kills);
-      statusLabel.textContent = `Раунд идёт · танков: ${next.tanks_alive}`;
-      hint.textContent = "Команды отправляются из терминального клиента.";
+    return await response.json();
+  } finally {
+    clearTimeout(timeoutId);
+    if (inflightController === controller) {
+      inflightController = null;
     }
-    retryDelay = 500;
-  } catch (error) {
-    if (error.name !== "AbortError") {
-      statusLabel.textContent = error.message;
-      console.error("pollState:", error);
+  }
+}
+
+async function pollLoop() {
+  if (polling) return;
+  polling = true;
+
+  while (!stopped) {
+    // Если вкладка не видна — не грузим сеть, но не выходим из цикла.
+    if (document.hidden) {
+      await new Promise(r => setTimeout(r, 500));
+      continue;
+    }
+
+    try {
+      const next = await fetchStateOnce();
+
+      // «Устаревший» ответ — пропускаем.
+      if (stateVersion != null && next.state_version === stateVersion) {
+        // Сервер вернул ту же версию — значит, был таймаут long-poll.
+        // Небольшая пауза, чтобы не спамить.
+        await new Promise(r => setTimeout(r, 100));
+        continue;
+      }
+
+      state = next;
+      stateVersion = next.state_version;
+
+      if (stateVersion !== lastRenderedVersion) {
+        lastRenderedVersion = stateVersion;
+        requestAnimationFrame(draw);
+        showKills(next.kills);
+        statusLabel.textContent = `Раунд идёт · танков: ${next.tanks_alive}`;
+        hint.textContent = "Команды отправляются из терминального клиента.";
+      }
+
+      retryDelay = 500;
+    } catch (error) {
+      if (error.name === "AbortError") {
+        // Наш собственный таймаут или abort по visibility — просто повтор.
+        await new Promise(r => setTimeout(r, retryDelay));
+        continue;
+      }
+      console.error("pollLoop:", error);
+      statusLabel.textContent = error.message || "Ошибка сети";
       await new Promise(r => setTimeout(r, retryDelay));
       retryDelay = Math.min(5000, retryDelay * 2);
     }
-  } finally {
-    if (inflight === controller) inflight = null;
   }
-  // Планируем следующий цикл — НЕ рекурсией, а микротаском.
-  setTimeout(pollState, 0);
 }
 
-// При возврате на вкладку — сразу дёргаем обновление.
+// При возврате на вкладку — сбрасываем возможные «залипшие» соединения.
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) {
-    if (inflight) {
-      inflight.abort();
-      inflight = null;
-    }
-    setTimeout(pollState, 0);
+  if (inflightController) {
+    try { inflightController.abort("visibility"); } catch (_) {}
+    inflightController = null;
+  }
+  retryDelay = 500;
+});
+
+// Перезапуск при закрытии — на всякий случай.
+window.addEventListener("pageshow", () => {
+  stopped = false;
+  if (!polling) pollLoop();
+});
+
+window.addEventListener("pagehide", () => {
+  stopped = true;
+  if (inflightController) {
+    try { inflightController.abort("unload"); } catch (_) {}
+    inflightController = null;
   }
 });
 
-window.addEventListener("resize", () => scheduleDraw());
-requestAnimationFrame(() => { draw(); pollState(); });
+window.addEventListener("resize", () => {
+  requestAnimationFrame(draw);
+});
+
+// Старт
+requestAnimationFrame(draw);
+pollLoop();
