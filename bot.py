@@ -1,16 +1,21 @@
 # bot.py
 """
-Агрессивный ИИ-бот: охотится ТОЛЬКО за живыми игроками.
+Агрессивный ИИ-бот: охотится за ЛИДЕРОМ по убийствам.
 
-Ключевые отличия от обычного бота:
-  * enemies = только живые игроки (is_bot == False). Боты игнорируются.
-  * Пока есть живой игрок — бот НЕ отвлекается на кирпичи ради самих кирпичей.
-  * Если игрок на линии и виден — сразу стреляет.
-  * Иначе — идёт кратчайшим путём к игроку (BFS напрямую к его клетке).
-  * Если путь заблокирован кирпичом на линии к игроку — пробивает кирпич.
-  * Никаких long-poll'ов: /api/state без after, команды в отдельной корутине.
-  * Решения принимаются оптимистично — не ждём ответа сервера, чтобы
-    сделать следующий шаг.
+Логика:
+  * Цель — живой ИГРОК с максимальным kills.
+  * При равенстве kills — ближайший к боту.
+  * Если живых игроков нет — бот стоит.
+  * Игрок на линии видимости → разворот и выстрел.
+  * Иначе — кирпич на прямой → пробиваем.
+  * Иначе — BFS прямо к клетке цели.
+  * Если путь к клетке цели закрыт (например, другим ботом) —
+    идём к соседней с целью клетке.
+
+Технически:
+  * /api/state без after — мгновенный ответ, без long-poll.
+  * Команды в отдельной корутине, отправка не блокирует принятие решений.
+  * Оптимистичное применение команды к локальной копии — не ждём сервера.
 """
 
 from __future__ import annotations
@@ -149,22 +154,26 @@ def dist2(a, b):
 # ---------------------------------------------------------------------------
 class LocalState:
     __slots__ = ("raw", "me", "enemies", "tiles", "blocked", "my_id",
-                 "last_server_version")
+                 "last_server_version", "kills_map")
 
     def __init__(self):
         self.raw = None
         self.me = None
-        self.enemies = []          # ТОЛЬКО живые игроки
+        self.enemies = []          # ТОЛЬКО живые игроки (не боты)
         self.tiles = []
         self.blocked = set()       # все живые танки (кроме меня)
         self.my_id: str | None = None
         self.last_server_version = None
+        self.kills_map: dict[str, int] = {}
 
     def update_from_server(self, state: dict, my_name: str) -> None:
         self.raw = state
         self.last_server_version = state.get("state_version")
         map_info = state.get("map") or {}
         self.tiles = map_info.get("tiles") or []
+
+        # Карта убийств {name: kills} — сервер уже отдаёт только игроков.
+        self.kills_map = dict(state.get("kills") or {})
 
         tanks = state.get("tanks") or []
         me = next(
@@ -176,12 +185,18 @@ class LocalState:
         self.my_id = self.me["id"] if self.me else None
 
         # ЦЕЛИ: только живые ИГРОКИ. Боты и «уснувшие» игроки игнорируются.
-        self.enemies = [
-            dict(t) for t in tanks
-            if t.get("alive")
-            and t.get("id") != self.my_id
-            and not t.get("is_bot")
-        ]
+        enemies = []
+        for t in tanks:
+            if not t.get("alive"):
+                continue
+            if t.get("id") == self.my_id:
+                continue
+            if t.get("is_bot"):
+                continue
+            copy = dict(t)
+            copy["kills"] = self.kills_map.get(t.get("name"), 0)
+            enemies.append(copy)
+        self.enemies = enemies
 
         # Препятствия для BFS: все живые танки, кроме меня.
         self.blocked = {
@@ -236,7 +251,6 @@ class BotClient:
         self._command_queue: asyncio.Queue[str] = asyncio.Queue()
         self._last_command_at = 0.0
         self._last_command: str | None = None
-        self._last_cell: tuple[int, int] | None = None
 
     async def __aenter__(self):
         connector = aiohttp.TCPConnector(limit=8, ttl_dns_cache=300)
@@ -303,19 +317,19 @@ class BotClient:
 
     # -- принятие решений ------------------------------------------------
     def _target(self):
-        """Ближайший живой игрок. При равенстве — кто виден на линии."""
+        """
+        Цель — живой игрок с максимумом убийств.
+        При равенстве kills — ближайший к боту.
+        """
         me = self.state.me
         if me is None or not self.state.enemies:
             return None
-        my_cell = (int(me["x"]), int(me["y"]))
-        tiles = self.state.tiles
-
-        def key(e):
-            cell = (int(e["x"]), int(e["y"]))
-            visible = 0 if shoot_direction(tiles, my_cell, cell) else 1
-            return (visible, dist2((me["x"], me["y"]), (e["x"], e["y"])))
-
-        return min(self.state.enemies, key=key)
+        mx, my = me["x"], me["y"]
+        return min(
+            self.state.enemies,
+            key=lambda e: (-int(e.get("kills", 0)),
+                           (e["x"] - mx) ** 2 + (e["y"] - my) ** 2),
+        )
 
     def _shoot_at(self, target_cell) -> str | None:
         me = self.state.me
@@ -331,8 +345,8 @@ class BotClient:
 
     def _blocking_brick_toward(self, enemy_cell) -> str | None:
         """
-        Если между мной и игроком по оси стоит кирпич — вернуть направление,
-        в котором надо встать, чтобы пробить его. Иначе None.
+        Если между мной и целью по оси стоит кирпич — вернуть направление
+        для выстрела в него. Иначе None.
         """
         me = self.state.me
         if me is None:
@@ -340,10 +354,8 @@ class BotClient:
         my_cell = (int(me["x"]), int(me["y"]))
         tiles = self.state.tiles
 
-        # Проверяем 4 оси от меня в сторону игрока.
         for direction, (dx, dy) in DIRECTIONS.items():
             x, y = my_cell
-            # Идём по клеткам в этом направлении.
             while True:
                 x += dx
                 y += dy
@@ -351,12 +363,9 @@ class BotClient:
                     break
                 tile = tiles[y][x]
                 if tile == BRICK_TILE:
-                    # Кирпич на этой оси. Игрок должен быть где-то за ним.
-                    # Если игрок дальше по этой оси — иначе не имеет смысла.
                     ex, ey = enemy_cell
                     if (dx > 0 and ex > x) or (dx < 0 and ex < x) \
                             or (dy > 0 and ey > y) or (dy < 0 and ey < y):
-                        # Разворачиваемся и стреляем в кирпич.
                         if me["direction"] != direction:
                             return direction
                         return "выстрел"
@@ -380,24 +389,23 @@ class BotClient:
 
         enemy_cell = (int(enemy["x"]), int(enemy["y"]))
 
-        # 1. Игрок на линии — стреляем.
+        # 1. Цель на линии — стреляем.
         cmd = self._shoot_at(enemy_cell)
         if cmd is not None:
             return cmd
 
-        # 2. Кирпич на прямой к игроку — пробиваем.
+        # 2. Кирпич на прямой к цели — пробиваем.
         cmd = self._blocking_brick_toward(enemy_cell)
         if cmd is not None:
             return cmd
 
-        # 3. Идём к игроку напрямую.
+        # 3. Идём к цели напрямую.
         blocked = self.state.blocked - {my_cell}
         step = bfs_path(tiles, my_cell, enemy_cell, blocked)
         if step is not None:
             return step
 
-        # 4. Путь не найден — пробуем клетки рядом с игроком (на случай,
-        # если прямой BFS до клетки игрока упирается в другого бота).
+        # 4. Прямой путь закрыт — идём к клетке рядом с целью.
         goals = set()
         for _, (dx, dy) in DIRECTIONS.items():
             cell = (enemy_cell[0] + dx, enemy_cell[1] + dy)
@@ -413,7 +421,6 @@ class BotClient:
         me = self.state.me
         if me is None or me.get("frozen"):
             return
-        # Если игроков нет — бот не должен «дёргаться».
         if not self.state.enemies:
             return
 
