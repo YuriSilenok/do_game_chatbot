@@ -5,7 +5,6 @@ const hint = document.querySelector("#hint");
 const killsList = document.querySelector("#kills-list");
 let state = null;
 let polling = false;
-let stateRequest = null;
 let stateVersion = null;
 
 const TANK_COLOR_CSS = {
@@ -27,6 +26,35 @@ function colorToCss(color, isBot) {
 
 function tileColor(type) {
   return ({ 1: "#b76537", 2: "#87939a", 3: "#2474a1", 4: "#397447", 5: "#a5e7ef", 6: "#e3b837" })[type] || "#111820";
+}
+
+// --- Подгонка холста под доступную область (без опоры на CSS aspect-ratio) ---
+function fitCanvas() {
+  const arena = board.parentElement;
+  if (!arena) return false;
+  const arenaRect = arena.getBoundingClientRect();
+  if (arenaRect.width < 1 || arenaRect.height < 1) return false;
+
+  const stats = arena.querySelector(".stats");
+  const hintEl = arena.querySelector("#hint");
+  const gapPx = 10;
+  const statsH = stats ? stats.getBoundingClientRect().height : 0;
+  const hintH = hintEl ? hintEl.getBoundingClientRect().height : 0;
+  const availableH = arenaRect.height - statsH - hintH - gapPx * 2;
+  const availableW = arenaRect.width;
+  if (availableH < 1 || availableW < 1) return false;
+
+  const cssW = Math.min(availableW, availableH * 2);
+  const cssH = cssW / 2;
+  const dpr = window.devicePixelRatio || 1;
+  const pixelsW = Math.max(1, Math.round(cssW * dpr));
+  const pixelsH = Math.max(1, Math.round(cssH * dpr));
+
+  if (board.width !== pixelsW) board.width = pixelsW;
+  if (board.height !== pixelsH) board.height = pixelsH;
+  board.style.width = cssW + "px";
+  board.style.height = cssH + "px";
+  return true;
 }
 
 function drawTile(type, x, y) {
@@ -61,51 +89,59 @@ function drawTile(type, x, y) {
 }
 
 function draw() {
-  if (!state) {
-    ctx.clearRect(0, 0, board.width, board.height);
-    return;
-  }
-  const mapWidth = state.map?.width || 26;
-  const mapHeight = state.map?.height || 13;
-  const size = Math.min(board.clientWidth || 800, board.clientHeight || 600);
-  if (!size) return;
-  const maxByHeight = (board.clientHeight || 600) / mapHeight * mapWidth;
-  const dpr = window.devicePixelRatio || 1;
-  const pixels = Math.min(
-    Math.round(size * dpr),
-    Math.round((board.clientWidth || 800) * dpr),
-    Math.round(maxByHeight * dpr),
-  );
-  const targetHeight = Math.round(pixels / mapWidth * mapHeight);
-  if (board.width !== pixels || board.height !== targetHeight) {
-    board.width = pixels;
-    board.height = targetHeight;
-  }
-  const scale = pixels / mapWidth;
-  ctx.setTransform(scale, 0, 0, scale, 0, 0);
-  ctx.fillStyle = "#111820";
-  ctx.fillRect(0, 0, mapWidth, mapHeight);
-
-  const tiles = state.map.tiles;
-  for (let y = 0; y < mapHeight; y++) {
-    const row = tiles[y];
-    for (let x = 0; x < mapWidth; x++) {
-      const type = row[x];
-      if (type !== 0) drawTile(type, x, y);
+  try {
+    if (!state) {
+      ctx.clearRect(0, 0, board.width, board.height);
+      return;
     }
-  }
-  for (const bonus of state.bonuses) {
-    drawBonus(bonus.type, bonus.x + .5, bonus.y + .5);
-  }
-  for (const shell of state.shells) {
-    ctx.fillStyle = "#fff4b8";
-    ctx.beginPath();
-    ctx.arc(shell.x, shell.y, .09, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  for (const tank of state.tanks) {
-    if (!tank.alive) continue;
-    drawTank(tank.x, tank.y, tank.direction, tank.is_bot, tank.shielded, tank.color);
+    const mapInfo = state.map || {};
+    const mapWidth = mapInfo.width || 26;
+    const mapHeight = mapInfo.height || 13;
+
+    // Новый формат: state.map.tiles. Резерв: state.blocks (старый сервер).
+    let tiles = Array.isArray(mapInfo.tiles) ? mapInfo.tiles : null;
+    if (!tiles && Array.isArray(state.blocks)) {
+      tiles = [];
+      for (let y = 0; y < mapHeight; y++) tiles.push(new Array(mapWidth).fill(0));
+      for (const b of state.blocks) tiles[b.y][b.x] = b.type;
+    }
+    if (!tiles || !tiles.length) {
+      console.error("state.map.tiles отсутствует в ответе сервера", state);
+      return;
+    }
+
+    if (!fitCanvas()) return;
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    const scaleX = board.width / mapWidth;
+    const scaleY = board.height / mapHeight;
+    ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
+
+    ctx.fillStyle = "#111820";
+    ctx.fillRect(0, 0, mapWidth, mapHeight);
+
+    for (let y = 0; y < mapHeight; y++) {
+      const row = tiles[y];
+      if (!row) continue;
+      for (let x = 0; x < mapWidth; x++) {
+        const type = row[x];
+        if (type) drawTile(type, x, y);
+      }
+    }
+    for (const bonus of state.bonuses) drawBonus(bonus.type, bonus.x + .5, bonus.y + .5);
+    for (const shell of state.shells) {
+      ctx.fillStyle = "#fff4b8";
+      ctx.beginPath();
+      ctx.arc(shell.x, shell.y, .09, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    for (const tank of state.tanks) {
+      if (!tank.alive) continue;
+      drawTank(tank.x, tank.y, tank.direction, tank.is_bot, tank.shielded, tank.color);
+    }
+  } catch (err) {
+    console.error("Ошибка отрисовки:", err);
   }
 }
 
@@ -122,10 +158,10 @@ function drawBonus(type, cx, cy) {
     for (let i = 0; i < 8; i += 1) {
       const radius = i % 2 === 0 ? outer : inner;
       const angle = Math.PI / 4 * i;
-      const pointX = Math.cos(angle) * radius;
-      const pointY = Math.sin(angle) * radius;
-      if (i === 0) ctx.moveTo(pointX, pointY);
-      else ctx.lineTo(pointX, pointY);
+      const px = Math.cos(angle) * radius;
+      const py = Math.sin(angle) * radius;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
     }
     ctx.closePath();
     ctx.fill();
@@ -192,12 +228,9 @@ async function pollState() {
   if (polling) return;
   polling = true;
   try {
-    stateRequest = new AbortController();
     const after = stateVersion == null ? "" : `?after=${stateVersion}`;
-    const response = await fetch(`/api/state${after}`, {
-      signal: stateRequest.signal
-    });
-    if (!response.ok) throw new Error("Не удалось получить состояние комнаты.");
+    const response = await fetch(`/api/state${after}`);
+    if (!response.ok) throw new Error(`Сервер ответил ${response.status}`);
     const next = await response.json();
     state = next;
     stateVersion = next.state_version;
@@ -206,17 +239,15 @@ async function pollState() {
     statusLabel.textContent = `Раунд идёт · танков: ${next.tanks_alive}`;
     hint.textContent = "Команды отправляются из терминального клиента.";
   } catch (error) {
-    if (error.name !== "AbortError") {
-      statusLabel.textContent = error.message;
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
+    statusLabel.textContent = error.message;
+    console.error("pollState:", error);
+    await new Promise(r => setTimeout(r, 1000));
   } finally {
-    stateRequest = null;
     polling = false;
   }
   pollState();
 }
 
-pollState();
 window.addEventListener("resize", draw);
-draw();
+// Первый draw после layout.
+requestAnimationFrame(() => { draw(); pollState(); });

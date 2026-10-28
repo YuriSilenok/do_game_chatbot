@@ -40,20 +40,12 @@ PLAYER_IDLE_SECONDS = 30
 SHELL_EVENT_SECONDS = 0.05
 BONUS_TYPES = ("звезда", "шлем", "часы")
 
-# Расписание размеров волн ботов.
 BOT_WAVE_SIZES = [1, 2, 3, 4, 5, 6, 7]
-# Интервал между волнами — динамический: max(1, BOT_WAVE_BASE_INTERVAL - лучший_счёт)
 BOT_WAVE_BASE_INTERVAL = 30.0
 
 TANK_COLORS = [
-    "красный",
-    "зелёный",
-    "синий",
-    "оранжевый",
-    "фиолетовый",
-    "маджента",
-    "лайм",
-    "голубой",
+    "красный", "зелёный", "синий", "оранжевый",
+    "фиолетовый", "маджента", "лайм", "голубой",
 ]
 BOT_COLOR = "серый"
 
@@ -117,7 +109,6 @@ class Room:
     updated_at: float = field(default_factory=time.time)
     color_counter: int = 0
     bot_wave_index: int = 0
-    # Wall-clock время запуска текущей волны (от него отсчитывается интервал).
     bot_wave_started_at: float | None = None
     next_bot_index: int = 1
 
@@ -128,7 +119,7 @@ class Room:
 
 
 # ---------------------------------------------------------------------------
-# Логика бота
+# Bot helpers
 # ---------------------------------------------------------------------------
 def _tile_at(tiles: list[list[int]], x: int, y: int) -> int | None:
     if 0 <= y < len(tiles) and 0 <= x < len(tiles[0]):
@@ -136,9 +127,7 @@ def _tile_at(tiles: list[list[int]], x: int, y: int) -> int | None:
     return None
 
 
-def _line_of_sight(tiles: list[list[int]],
-                   first: tuple[int, int],
-                   second: tuple[int, int]) -> bool:
+def _line_of_sight(tiles, first, second) -> bool:
     x1, y1 = first
     x2, y2 = second
     x_start, y_start = x1 + 0.5, y1 + 0.5
@@ -154,7 +143,7 @@ def _line_of_sight(tiles: list[list[int]],
     return True
 
 
-def _direction_between(src: tuple[int, int], dst: tuple[int, int]) -> str | None:
+def _direction_between(src, dst) -> str | None:
     dx = dst[0] - src[0]
     dy = dst[1] - src[1]
     if dx == 0 and dy != 0:
@@ -164,18 +153,13 @@ def _direction_between(src: tuple[int, int], dst: tuple[int, int]) -> str | None
     return None
 
 
-def _bfs_next_step(tiles: list[list[int]],
-                   start: tuple[int, int],
-                   goals: set[tuple[int, int]],
-                   blocked: set[tuple[int, int]]) -> str | None:
+def _bfs_next_step(tiles, start, goals, blocked) -> str | None:
     if start in goals:
         return None
-
     height = len(tiles)
     width = len(tiles[0])
     queue = deque([(start, None)])
     visited = {start}
-
     while queue:
         (x, y), first_dir = queue.popleft()
         for name, (dx, dy) in DIRECTIONS.items():
@@ -199,9 +183,6 @@ class Game:
         self.room = Room(id="1", name="Общая")
         self.start_round(self.room)
 
-    # ------------------------------------------------------------------
-    # Сводки и вспомогательные
-    # ------------------------------------------------------------------
     def room_summary(self, room: Room) -> dict:
         return {
             "id": room.id,
@@ -231,18 +212,19 @@ class Game:
         name = name.strip()
         if not name or len(name) > 40:
             raise ValueError("Имя должно содержать от 1 до 40 символов.")
-        if any(player.casefold() == name.casefold() for player in room.registrations):
+        if any(p.casefold() == name.casefold() for p in room.registrations):
             raise ValueError("Это имя уже зарегистрировано в комнате.")
         room.registrations.append(name)
         self._ensure_map(room)
 
+        # CHANGED: рандомная точка респавна среди свободных.
         spawn_points = self._spawn_points(room)
-        used_cells = {(int(t.x), int(t.y)) for t in room.tanks}
+        used_cells = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
         free_points = [p for p in spawn_points if p not in used_cells]
         if free_points:
-            x, y = free_points[0]
+            x, y = random.choice(free_points)
         else:
-            x, y = spawn_points[len(room.tanks) % len(spawn_points)]
+            x, y = random.choice(spawn_points)
 
         tank = Tank(
             id=room.object_id("tank"),
@@ -255,9 +237,7 @@ class Game:
         room.tanks.append(tank)
         room.updated_at = time.time()
 
-    def _game_line_of_sight(self, room: Room,
-                            first: tuple[int, int],
-                            second: tuple[int, int]) -> bool:
+    def _game_line_of_sight(self, room, first, second) -> bool:
         x1, y1 = first
         x2, y2 = second
         if room.tiles[y1][x1] == 4 or room.tiles[y2][x2] == 4:
@@ -284,8 +264,7 @@ class Game:
             if tile in PASSABLE_TILES
         ]
         random.shuffle(available)
-        selected: list[tuple[int, int]] = []
-        remaining: list[tuple[int, int]] = []
+        selected, remaining = [], []
         for candidate in available:
             if all(
                 not self._game_line_of_sight(room, candidate, point)
@@ -297,9 +276,6 @@ class Game:
         room.spawn_points = selected + remaining
         return room.spawn_points
 
-    # ------------------------------------------------------------------
-    # Боты: волны
-    # ------------------------------------------------------------------
     def _best_player_kills(self, room: Room) -> int:
         registered = {name.casefold() for name in room.registrations}
         best = 0
@@ -309,7 +285,6 @@ class Game:
         return best
 
     def _bot_wave_interval(self, room: Room) -> float:
-        """Интервал до следующей волны: 30 - лучший_счёт, но не меньше 1 с."""
         return max(1.0, BOT_WAVE_BASE_INTERVAL - self._best_player_kills(room))
 
     def _free_spawn_cells(self, room: Room) -> list[tuple[int, int]]:
@@ -318,7 +293,7 @@ class Game:
         free = [p for p in spawn_points if p not in used_cells]
         if free:
             return free
-        fallback: list[tuple[int, int]] = []
+        fallback = []
         for y, row in enumerate(room.tiles):
             for x, tile in enumerate(row):
                 if tile in PASSABLE_TILES and (x, y) not in used_cells:
@@ -326,14 +301,15 @@ class Game:
         return fallback
 
     def _add_bot(self, room: Room) -> Tank | None:
+        # CHANGED: рандомная точка для ботов.
         free_points = self._free_spawn_cells(room)
-        if not free_points:
+        if free_points:
+            x, y = random.choice(free_points)
+        else:
             spawn_points = self._spawn_points(room)
             if not spawn_points:
                 return None
-            x, y = spawn_points[room.next_bot_index % len(spawn_points)]
-        else:
-            x, y = free_points[0]
+            x, y = random.choice(spawn_points)
 
         bot_name = f"Бот-{room.next_bot_index}"
         while any(t.name.casefold() == bot_name.casefold() for t in room.tanks):
@@ -360,9 +336,6 @@ class Game:
             added += 1
         return added
 
-    # ------------------------------------------------------------------
-    # Раунд
-    # ------------------------------------------------------------------
     def start_round(self, room: Room) -> None:
         self._ensure_map(room)
         room.bonuses = []
@@ -391,23 +364,19 @@ class Game:
         room.last_simulated_at = time.monotonic()
         room.updated_at = time.time()
 
-    # ------------------------------------------------------------------
-    # Команды
-    # ------------------------------------------------------------------
     def fire(self, room: Room, tank: Tank) -> None:
         if tank.alive and len(tank.shells) < tank.shell_limit:
             tank.shells.append(
                 Shell(
                     id=room.object_id("shell"),
                     owner_id=tank.id,
-                    x=tank.x,
-                    y=tank.y,
+                    x=tank.x, y=tank.y,
                     direction=tank.direction,
                     speed=5.0 + tank.level * 0.5,
                 )
             )
 
-    def _can_tank_occupy(self, room: Room, x: float, y: float, tank: Tank) -> bool:
+    def _can_tank_occupy(self, room: Room, x, y, tank) -> bool:
         radius = 0.29
         for cx in (int(x - radius), int(x + radius)):
             for cy in (int(y - radius), int(y + radius)):
@@ -416,18 +385,18 @@ class Game:
                 if room.tiles[cy][cx] in (1, 2, 6):
                     return False
         for other in room.tanks:
-            if other is not tank and other.alive and abs(other.x - x) < 0.58 and abs(other.y - y) < 0.58:
+            if (other is not tank and other.alive
+                    and abs(other.x - x) < 0.58
+                    and abs(other.y - y) < 0.58):
                 return False
         return True
 
-    def _move_tank_one_tile(self, room: Room, tank: Tank, direction: str) -> bool:
+    def _move_tank_one_tile(self, room, tank, direction) -> bool:
         dx, dy = DIRECTIONS[direction]
-        nx = tank.x + dx
-        ny = tank.y + dy
+        nx, ny = tank.x + dx, tank.y + dy
         if not self._can_tank_occupy(room, nx, ny, tank):
             return False
-        tank.x = nx
-        tank.y = ny
+        tank.x, tank.y = nx, ny
         return True
 
     def apply_command(self, room: Room, tank: Tank, command: str) -> None:
@@ -441,110 +410,88 @@ class Game:
         elif command == "выстрел":
             self.fire(room, tank)
 
-    # ------------------------------------------------------------------
-    # Симуляция снарядов / бонусов
-    # ------------------------------------------------------------------
     def _move_shells(self, room: Room, dt: float) -> None:
-        shells = [shell for tank in room.tanks for shell in tank.shells]
+        shells = [s for t in room.tanks for s in t.shells]
         if not shells:
             return
-
-        steps = max(1, math.ceil(max(shell.speed for shell in shells) * dt / 0.08))
+        steps = max(1, math.ceil(max(s.speed for s in shells) * dt / 0.08))
         step_dt = dt / steps
         destroyed: set[str] = set()
-        registered_names = {name.casefold() for name in room.registrations}
+        registered_names = {n.casefold() for n in room.registrations}
 
         for _ in range(steps):
-            active = [shell for shell in shells if shell.id not in destroyed]
+            active = [s for s in shells if s.id not in destroyed]
             if not active:
                 break
+            for s in active:
+                dx, dy = DIRECTIONS[s.direction]
+                s.x += dx * s.speed * step_dt
+                s.y += dy * s.speed * step_dt
+            coll_d2 = 0.18 ** 2
+            nearby: dict[tuple[int, int], list[Shell]] = {}
+            for s in active:
+                cell = (int(s.x), int(s.y))
+                for cx in range(cell[0] - 1, cell[0] + 2):
+                    for cy in range(cell[1] - 1, cell[1] + 2):
+                        for other in nearby.get((cx, cy), []):
+                            dx, dy = s.x - other.x, s.y - other.y
+                            if dx * dx + dy * dy <= coll_d2:
+                                destroyed.add(s.id); destroyed.add(other.id)
+                nearby.setdefault(cell, []).append(s)
 
-            for shell in active:
-                dx, dy = DIRECTIONS[shell.direction]
-                shell.x += dx * shell.speed * step_dt
-                shell.y += dy * shell.speed * step_dt
-
-            collision_distance_squared = 0.18 ** 2
-            nearby_shells: dict[tuple[int, int], list[Shell]] = {}
-            for shell in active:
-                cell = (int(shell.x), int(shell.y))
-                for cell_x in range(cell[0] - 1, cell[0] + 2):
-                    for cell_y in range(cell[1] - 1, cell[1] + 2):
-                        for other in nearby_shells.get((cell_x, cell_y), []):
-                            distance_x = shell.x - other.x
-                            distance_y = shell.y - other.y
-                            if distance_x ** 2 + distance_y ** 2 <= collision_distance_squared:
-                                destroyed.add(shell.id)
-                                destroyed.add(other.id)
-                nearby_shells.setdefault(cell, []).append(shell)
-
-            for shell in active:
-                if shell.id in destroyed:
+            for s in active:
+                if s.id in destroyed:
                     continue
-                cx, cy = int(shell.x), int(shell.y)
+                cx, cy = int(s.x), int(s.y)
                 if not (0 <= cx < MAP_WIDTH and 0 <= cy < MAP_HEIGHT):
-                    destroyed.add(shell.id)
-                    continue
-
+                    destroyed.add(s.id); continue
                 tile = room.tiles[cy][cx]
                 if tile == 1:
-                    hp_key = (cx, cy)
-                    room.brick_hp[hp_key] = room.brick_hp.get(hp_key, 2) - 1
-                    if room.brick_hp[hp_key] <= 0:
+                    key = (cx, cy)
+                    room.brick_hp[key] = room.brick_hp.get(key, 2) - 1
+                    if room.brick_hp[key] <= 0:
                         room.tiles[cy][cx] = 0
-                        room.brick_hp.pop(hp_key, None)
-                    destroyed.add(shell.id)
-                    continue
+                        room.brick_hp.pop(key, None)
+                    destroyed.add(s.id); continue
                 if tile in (2, 6):
-                    destroyed.add(shell.id)
-                    continue
-
+                    destroyed.add(s.id); continue
                 target = next(
-                    (
-                        tank for tank in room.tanks
-                        if tank.alive and tank.id != shell.owner_id
-                        and abs(tank.x - shell.x) < 0.38
-                        and abs(tank.y - shell.y) < 0.38
-                    ),
+                    (t for t in room.tanks
+                     if t.alive and t.id != s.owner_id
+                     and abs(t.x - s.x) < 0.38
+                     and abs(t.y - s.y) < 0.38),
                     None,
                 )
                 if target is None:
                     continue
-
                 if target.shield_until < time.monotonic():
                     target.alive = False
-                    destroyed.update(owned_shell.id for owned_shell in target.shells)
+                    destroyed.update(ss.id for ss in target.shells)
                     target.shells.clear()
-                    owner = next(
-                        (tank for tank in room.tanks if tank.id == shell.owner_id),
-                        None,
-                    )
+                    owner = next((t for t in room.tanks if t.id == s.owner_id), None)
                     if owner is not None and owner.name.casefold() in registered_names:
                         owner.kills += 1
                     if random.random() < 0.3:
-                        room.bonuses.append(
-                            Bonus(
-                                id=room.object_id("bonus"),
-                                kind=random.choice(BONUS_TYPES),
-                                x=cx,
-                                y=cy,
-                                expires_at=time.monotonic() + 20,
-                            )
-                        )
-                destroyed.add(shell.id)
+                        room.bonuses.append(Bonus(
+                            id=room.object_id("bonus"),
+                            kind=random.choice(BONUS_TYPES),
+                            x=cx, y=cy,
+                            expires_at=time.monotonic() + 20,
+                        ))
+                destroyed.add(s.id)
 
         for tank in room.tanks:
-            tank.shells[:] = [shell for shell in tank.shells if shell.id not in destroyed]
+            tank.shells[:] = [s for s in tank.shells if s.id not in destroyed]
 
         dead_players = {
-            tank.name.casefold()
-            for tank in room.tanks
-            if not tank.alive and tank.name.casefold() in registered_names
+            t.name.casefold()
+            for t in room.tanks
+            if not t.alive and t.name.casefold() in registered_names
         }
         if dead_players:
-            room.tanks[:] = [tank for tank in room.tanks if tank.name.casefold() not in dead_players]
+            room.tanks[:] = [t for t in room.tanks if t.name.casefold() not in dead_players]
             room.registrations[:] = [
-                name for name in room.registrations if name.casefold() not in dead_players
+                n for n in room.registrations if n.casefold() not in dead_players
             ]
 
     def _collect_bonuses(self, room: Room) -> None:
@@ -552,10 +499,8 @@ class Game:
         kept = []
         for bonus in room.bonuses:
             collector = next(
-                (
-                    tank for tank in room.tanks
-                    if tank.alive and int(tank.x) == bonus.x and int(tank.y) == bonus.y
-                ),
+                (t for t in room.tanks
+                 if t.alive and int(t.x) == bonus.x and int(t.y) == bonus.y),
                 None,
             )
             if collector is None and bonus.expires_at > now:
@@ -572,22 +517,14 @@ class Game:
                             enemy.frozen_until = max(enemy.frozen_until, now + 5)
         room.bonuses = kept
 
-    # ------------------------------------------------------------------
-    # Логика ботов
-    # ------------------------------------------------------------------
-    def _brick_command(self, room: Room,
-                       tank: Tank,
-                       my_cell: tuple[int, int],
-                       blocked: set[tuple[int, int]]) -> str | None:
+    def _brick_command(self, room, tank, my_cell, blocked) -> str | None:
         tiles = room.tiles
         best: tuple[int, str] | None = None
         for direction, (dx, dy) in DIRECTIONS.items():
             x, y = my_cell
             dist = 0
             while True:
-                x += dx
-                y += dy
-                dist += 1
+                x += dx; y += dy; dist += 1
                 if not (0 <= x < MAP_WIDTH and 0 <= y < MAP_HEIGHT):
                     break
                 tile = tiles[y][x]
@@ -599,41 +536,31 @@ class Game:
                     break
                 if (x, y) in blocked:
                     break
-
         if best is not None:
             direction = best[1]
-            if tank.direction != direction:
-                return direction
-            return "выстрел"
+            return direction if tank.direction != direction else "выстрел"
         return None
 
-    def _bot_command(self, room: Room, tank: Tank) -> str | None:
-        targets = [other for other in room.tanks if other.alive and other.id != tank.id]
+    def _bot_command(self, room, tank) -> str | None:
+        targets = [o for o in room.tanks if o.alive and o.id != tank.id]
         if not targets:
             return None
-
         tiles = room.tiles
         my_cell = (int(tank.x), int(tank.y))
         blocked = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
-
-        targets.sort(key=lambda other: (other.x - tank.x) ** 2 + (other.y - tank.y) ** 2)
-
+        targets.sort(key=lambda o: (o.x - tank.x) ** 2 + (o.y - tank.y) ** 2)
         for enemy in targets:
             enemy_cell = (int(enemy.x), int(enemy.y))
             if _line_of_sight(tiles, my_cell, enemy_cell):
-                dir_name = _direction_between(my_cell, enemy_cell)
-                if dir_name is not None:
-                    if tank.direction != dir_name:
-                        return dir_name
-                    return "выстрел"
-
-        brick_cmd = self._brick_command(room, tank, my_cell, blocked)
-        if brick_cmd is not None:
-            return brick_cmd
-
+                d = _direction_between(my_cell, enemy_cell)
+                if d is not None:
+                    return d if tank.direction != d else "выстрел"
+        bc = self._brick_command(room, tank, my_cell, blocked)
+        if bc is not None:
+            return bc
         for enemy in targets:
             enemy_cell = (int(enemy.x), int(enemy.y))
-            goals: set[tuple[int, int]] = set()
+            goals = set()
             for _, (dx, dy) in DIRECTIONS.items():
                 cell = (enemy_cell[0] + dx, enemy_cell[1] + dy)
                 tile = _tile_at(tiles, *cell)
@@ -641,66 +568,56 @@ class Game:
                     goals.add(cell)
             if not goals:
                 continue
-            step_dir = _bfs_next_step(tiles, my_cell, goals, blocked - {my_cell})
-            if step_dir is not None:
-                return step_dir
-
+            step = _bfs_next_step(tiles, my_cell, goals, blocked - {my_cell})
+            if step is not None:
+                return step
         return None
 
-    # ------------------------------------------------------------------
-    # Главный тик
-    # ------------------------------------------------------------------
     def next_room_event_delay(self, room: Room) -> float | None:
-        monotonic_now = time.monotonic()
-        wall_now = time.time()
-        delays: list[float] = []
-
+        mono = time.monotonic()
+        wall = time.time()
+        delays = []
         if room.phase == "round":
             if room.bot_wave_started_at is not None:
                 interval = self._bot_wave_interval(room)
-                delays.append(max(0.0, room.bot_wave_started_at + interval - wall_now))
+                delays.append(max(0.0, room.bot_wave_started_at + interval - wall))
             for tank in room.tanks:
                 if not tank.alive:
                     continue
-                if tank.shield_until > monotonic_now:
-                    delays.append(tank.shield_until - monotonic_now)
-                if tank.frozen_until > monotonic_now:
-                    delays.append(tank.frozen_until - monotonic_now)
+                if tank.shield_until > mono:
+                    delays.append(tank.shield_until - mono)
+                if tank.frozen_until > mono:
+                    delays.append(tank.frozen_until - mono)
                 elif tank.is_bot:
-                    delays.append(max(0, tank.next_bot_command_at - monotonic_now))
+                    delays.append(max(0, tank.next_bot_command_at - mono))
                 else:
-                    delays.append(max(0, tank.last_command_at + PLAYER_IDLE_SECONDS - monotonic_now))
+                    delays.append(max(0, tank.last_command_at + PLAYER_IDLE_SECONDS - mono))
             for bonus in room.bonuses:
-                delays.append(max(0, bonus.expires_at - monotonic_now))
-            if any(tank.shells for tank in room.tanks):
+                delays.append(max(0, bonus.expires_at - mono))
+            if any(t.shells for t in room.tanks):
                 delays.append(SHELL_EVENT_SECONDS)
-
         return min(delays) if delays else None
 
     def process_room_events(self, room: Room, now: float | None = None) -> None:
         now = time.monotonic() if now is None else now
-        wall_now = time.time()
+        wall = time.time()
         elapsed = max(0, now - room.last_simulated_at)
         room.last_simulated_at = now
-
         if room.phase != "round":
             return
 
-        # Планирование волн ботов — интервал зависит от лучшего счёта.
         if room.bot_wave_started_at is not None:
             interval = self._bot_wave_interval(room)
-            if wall_now >= room.bot_wave_started_at + interval:
+            if wall >= room.bot_wave_started_at + interval:
                 if room.bot_wave_index < len(BOT_WAVE_SIZES):
                     self._add_bot_wave(room, BOT_WAVE_SIZES[room.bot_wave_index])
                     room.bot_wave_index += 1
-                if room.bot_wave_index < len(BOT_WAVE_SIZES):
-                    room.bot_wave_started_at = wall_now
-                else:
-                    room.bot_wave_started_at = None
+                room.bot_wave_started_at = (
+                    wall if room.bot_wave_index < len(BOT_WAVE_SIZES) else None
+                )
 
         self._move_shells(room, elapsed)
         self._collect_bonuses(room)
-
         for tank in room.tanks:
             if not tank.alive:
                 continue
@@ -710,58 +627,40 @@ class Game:
             if tank.frozen_until > now:
                 continue
             if tank.is_bot and now >= tank.next_bot_command_at:
-                command = self._bot_command(room, tank)
-                if command is not None:
-                    self.apply_command(room, tank, command)
+                cmd = self._bot_command(room, tank)
+                if cmd is not None:
+                    self.apply_command(room, tank, cmd)
                 tank.next_bot_command_at = now + BOT_COMMAND_SECONDS
-
         self._collect_bonuses(room)
-        room.updated_at = wall_now
+        room.updated_at = wall
 
     def room_state(self, room: Room) -> dict:
-        tiles = room.tiles or MAP_TEMPLATE
-        registered_names = {name.casefold() for name in room.registrations}
+        tiles = room.tiles or [row.copy() for row in MAP_TEMPLATE]
+        registered = {n.casefold() for n in room.registrations}
         return {
             **self.room_summary(room),
             "state_version": room.state_version,
             "map": {"width": MAP_WIDTH, "height": MAP_HEIGHT, "tiles": tiles},
             "tanks": [
                 {
-                    "id": tank.id,
-                    "name": tank.name,
-                    "is_bot": tank.is_bot,
-                    "x": tank.x,
-                    "y": tank.y,
-                    "direction": tank.direction,
-                    "color": tank.color,
-                    "alive": tank.alive,
-                    "level": tank.level,
-                    "shielded": tank.shield_until > time.monotonic(),
-                    "frozen": tank.frozen_until > time.monotonic(),
+                    "id": t.id, "name": t.name, "is_bot": t.is_bot,
+                    "x": t.x, "y": t.y, "direction": t.direction,
+                    "color": t.color, "alive": t.alive, "level": t.level,
+                    "shielded": t.shield_until > time.monotonic(),
+                    "frozen": t.frozen_until > time.monotonic(),
                 }
-                for tank in room.tanks
+                for t in room.tanks
             ],
             "shells": [
-                {
-                    "id": shell.id,
-                    "owner_id": shell.owner_id,
-                    "x": shell.x,
-                    "y": shell.y,
-                    "direction": shell.direction,
-                }
-                for tank in room.tanks
-                for shell in tank.shells
+                {"id": s.id, "owner_id": s.owner_id, "x": s.x, "y": s.y, "direction": s.direction}
+                for t in room.tanks for s in t.shells
             ],
             "bonuses": [
-                {"id": bonus.id, "type": bonus.kind, "x": bonus.x, "y": bonus.y}
-                for bonus in room.bonuses
+                {"id": b.id, "type": b.kind, "x": b.x, "y": b.y}
+                for b in room.bonuses
             ],
             "kills": dict(sorted(
-                (
-                    (tank.name, tank.kills)
-                    for tank in room.tanks
-                    if tank.name.casefold() in registered_names
-                ),
+                ((t.name, t.kills) for t in room.tanks if t.name.casefold() in registered),
                 key=lambda item: -item[1],
             )),
             "server_time": time.time(),
