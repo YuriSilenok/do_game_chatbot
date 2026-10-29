@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import random
 import time
@@ -48,6 +49,12 @@ BONUS_TYPES = ("звезда", "шлем", "часы")
 BOT_TARGET_COUNT = 5
 BOT_RESPAWN_SECONDS = 5.0
 
+# «Страховочный» минимум для long-poll: если в комнате есть живые
+# игроки-люди, будим их не реже этого интервала, чтобы клиенты не
+# висели 0.5 с в ожидании хода серверного бота. Это НЕ ускоряет игру —
+# просто чаще возвращает неизменённое состояние.
+STATE_KEEPALIVE_SECONDS = 0.2
+
 TANK_COLORS = [
     "красный", "зелёный", "синий", "оранжевый",
     "фиолетовый", "маджента", "лайм", "голубой",
@@ -89,6 +96,9 @@ class Tank:
     # True — бот создан сервером; False — игрок, ставший ботом по простою.
     initially_bot: bool = False
     respawn_at: float = 0
+    # Кэш BFS-команды для серверных ботов: не пересчитываем на каждом GET.
+    cached_bot_command: str | None = None
+    cached_bot_command_at: float = 0
 
 
 @dataclass
@@ -331,13 +341,6 @@ class Game:
         return tank
 
     def _ensure_bot_count(self, room: Room) -> None:
-        """
-        Держит ровно BOT_TARGET_COUNT «настоящих» ботов.
-        Считает:
-          * живых ботов (alive=True, is_bot=True, initially_bot=True);
-          * мёртвых, ожидающих респавн (respawn_at > 0).
-        «Уснувших» игроков (is_bot=True, initially_bot=False) НЕ считает.
-        """
         alive_bots = 0
         pending = 0
         for t in room.tanks:
@@ -373,6 +376,8 @@ class Game:
             tank.last_command_at = now
             tank.next_bot_command_at = now
             tank.respawn_at = 0
+            tank.cached_bot_command = None
+            tank.cached_bot_command_at = 0
 
     # ------------------------------------------------------------------
     # Раунд
@@ -380,7 +385,6 @@ class Game:
     def start_round(self, room: Room) -> None:
         self._ensure_map(room)
         room.bonuses = []
-        # Удаляем всех ботов — создадим заново ровно BOT_TARGET_COUNT.
         room.tanks = [t for t in room.tanks if not t.is_bot and t.alive]
         room.next_bot_index = 1
         self._ensure_bot_count(room)
@@ -396,6 +400,8 @@ class Game:
             tank.frozen_until = 0
             tank.last_command_at = time.monotonic()
             tank.respawn_at = 0
+            tank.cached_bot_command = None
+            tank.cached_bot_command_at = 0
 
         room.phase = "round"
         room.last_simulated_at = time.monotonic()
@@ -454,7 +460,12 @@ class Game:
             tank.direction = direction
         self._move_tank_one_tile(room, tank, direction)
 
-    def _move_shells(self, room: Room, dt: float) -> None:
+    async def _move_shells(self, room: Room, dt: float) -> None:
+        """
+        Асинхронная версия: каждые N подшагов отдаёт управление
+        event loop через asyncio.sleep(0), чтобы долгий тик не блокировал
+        long-poll'ы других клиентов.
+        """
         shells = [s for t in room.tanks for s in t.shells]
         if not shells:
             return
@@ -463,7 +474,10 @@ class Game:
         destroyed: set[str] = set()
         registered_names = {n.casefold() for n in room.registrations}
 
-        for _ in range(steps):
+        for step_i in range(steps):
+            if step_i and step_i % 16 == 0:
+                # раз в ~16 подшагов (~0.02 с) уступаем другим корутинам
+                await asyncio.sleep(0)
             active = [s for s in shells if s.id not in destroyed]
             if not active:
                 break
@@ -564,145 +578,4 @@ class Game:
         room.bonuses = kept
 
     # ------------------------------------------------------------------
-    # Цель бота — лидер по убийствам; стрельба только по линии
-    # ------------------------------------------------------------------
-    def _bot_target(self, room: Room, tank: Tank) -> Tank | None:
-        """Живой игрок с максимумом убийств; при равенстве — ближайший."""
-        registered = {n.casefold() for n in room.registrations}
-        candidates = [
-            t for t in room.tanks
-            if t.alive and not t.is_bot and t.name.casefold() in registered
-        ]
-        if not candidates:
-            return None
-        return min(
-            candidates,
-            key=lambda t: (-t.kills, (t.x - tank.x) ** 2 + (t.y - tank.y) ** 2),
-        )
-
-    def _bot_command(self, room: Room, tank: Tank) -> str | None:
-        """
-        Стреляем ТОЛЬКО если цель на линии видимости и на одной оси.
-        Иначе — BFS-шаг к клетке цели (без разрушения стен).
-        """
-        target = self._bot_target(room, tank)
-        if target is None:
-            return None
-
-        tiles = room.tiles
-        my_cell = (int(tank.x), int(tank.y))
-        target_cell = (int(target.x), int(target.y))
-        blocked = {(int(t.x), int(t.y)) for t in room.tanks if t.alive}
-
-        if _line_of_sight(tiles, my_cell, target_cell):
-            d = _direction_between(my_cell, target_cell)
-            if d is not None:
-                return d if tank.direction != d else "выстрел"
-
-        step = _bfs_next_step(tiles, my_cell, {target_cell}, blocked - {my_cell})
-        if step is not None:
-            return step
-
-        goals = set()
-        for _, (dx, dy) in DIRECTIONS.items():
-            cell = (target_cell[0] + dx, target_cell[1] + dy)
-            tile = _tile_at(tiles, *cell)
-            if tile in PASSABLE_TILES and cell not in blocked:
-                goals.add(cell)
-        return _bfs_next_step(tiles, my_cell, goals, blocked - {my_cell})
-
-    # ------------------------------------------------------------------
-    # Главный тик
-    # ------------------------------------------------------------------
-    def next_room_event_delay(self, room: Room) -> float | None:
-        mono = time.monotonic()
-        delays = []
-        if room.phase == "round":
-            for tank in room.tanks:
-                if tank.is_bot and not tank.alive:
-                    if tank.respawn_at > 0:
-                        delays.append(max(0.0, tank.respawn_at - mono))
-                    continue
-                if not tank.alive:
-                    continue
-                if tank.shield_until > mono:
-                    delays.append(tank.shield_until - mono)
-                if tank.frozen_until > mono:
-                    delays.append(tank.frozen_until - mono)
-                elif tank.is_bot:
-                    delays.append(max(0, tank.next_bot_command_at - mono))
-                else:
-                    delays.append(max(0, tank.last_command_at + PLAYER_IDLE_SECONDS - mono))
-            for bonus in room.bonuses:
-                delays.append(max(0, bonus.expires_at - mono))
-            if any(t.shells for t in room.tanks):
-                delays.append(SHELL_EVENT_SECONDS)
-        return min(delays) if delays else None
-
-    def process_room_events(self, room: Room, now: float | None = None) -> None:
-        now = time.monotonic() if now is None else now
-        wall = time.time()
-        elapsed = max(0, now - room.last_simulated_at)
-        room.last_simulated_at = now
-        if room.phase != "round":
-            return
-
-        self._process_bot_respawns(room, now)
-        self._ensure_bot_count(room)
-
-        self._move_shells(room, elapsed)
-        self._collect_bonuses(room)
-        for tank in room.tanks:
-            if not tank.alive:
-                continue
-            if (not tank.is_bot and not tank.initially_bot
-                    and now - tank.last_command_at >= PLAYER_IDLE_SECONDS):
-                tank.is_bot = True
-                tank.next_bot_command_at = now
-            if tank.frozen_until > now:
-                continue
-            if tank.is_bot and now >= tank.next_bot_command_at:
-                cmd = self._bot_command(room, tank)
-                if cmd == "выстрел":
-                    self.fire(room, tank)
-                elif cmd in DIRECTIONS:
-                    self._bot_step(room, tank, cmd)
-                # Ровно 2 действия/с: единый интервал для шага и выстрела.
-                tank.next_bot_command_at = now + BOT_COMMAND_SECONDS
-        self._collect_bonuses(room)
-        room.updated_at = wall
-
-    def room_state(self, room: Room) -> dict:
-        tiles = room.tiles or [row.copy() for row in MAP_TEMPLATE]
-        registered = {n.casefold() for n in room.registrations}
-        return {
-            **self.room_summary(room),
-            "state_version": room.state_version,
-            "map": {"width": MAP_WIDTH, "height": MAP_HEIGHT, "tiles": tiles},
-            "tanks": [
-                {
-                    "id": t.id, "name": t.name, "is_bot": t.is_bot,
-                    "x": t.x, "y": t.y, "direction": t.direction,
-                    "color": t.color, "alive": t.alive, "level": t.level,
-                    "shielded": t.shield_until > time.monotonic(),
-                    "frozen": t.frozen_until > time.monotonic(),
-                }
-                for t in room.tanks
-            ],
-            "shells": [
-                {"id": s.id, "owner_id": s.owner_id, "x": s.x, "y": s.y, "direction": s.direction}
-                for t in room.tanks for s in t.shells
-            ],
-            "bonuses": [
-                {"id": b.id, "type": b.kind, "x": b.x, "y": b.y}
-                for b in room.bonuses
-            ],
-            "kills": dict(sorted(
-                ((t.name, t.kills) for t in room.tanks if t.name.casefold() in registered),
-                key=lambda item: -item[1],
-            )),
-            "server_time": time.time(),
-        }
-
-
-game = Game()
+    # Цель бота — лидер по убийствам; стрельба только по
