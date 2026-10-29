@@ -15,6 +15,9 @@ from game import STATE_LONGPOLL_SECONDS, game
 
 BASE_DIR = Path(__file__).resolve().parent
 state_condition = asyncio.Condition()
+# Сериализует вызовы process_room_events, чтобы тик не выполнялся
+# параллельно из /api/state и room_event_loop.
+_state_lock = asyncio.Lock()
 room_wakeup = asyncio.Event()
 room_task: Optional[asyncio.Task] = None
 
@@ -40,8 +43,8 @@ def _bump_version() -> None:
 async def publish_room_event() -> None:
     """
     Публикует событие: увеличивает версию и будит long-poll'ы.
-    Всё внутри `async with state_condition`, чтобы не было гонки
-    «notify раньше, чем wait».
+    Лок держим минимально — только на bump + notify, чтобы не
+    блокировать другие корутины.
     """
     global room_task
     async with state_condition:
@@ -49,6 +52,23 @@ async def publish_room_event() -> None:
         if room_task is None or room_task.done():
             room_task = asyncio.create_task(room_event_loop())
         room_wakeup.set()
+        state_condition.notify_all()
+
+
+async def _run_tick() -> None:
+    """
+    Выполняет один тик симуляции ВНЕ state_condition.
+    Тик может быть долгим (много снарядов, BFS ботов), но он больше
+    не блокирует long-poll'ы. По завершении увеличивает версию и
+    будит ожидающих.
+    """
+    async with _state_lock:
+        try:
+            await game.process_room_events(game.room)
+        except Exception as exc:  # не даём тику убить event loop
+            print(f"[tick] error: {exc!r}")
+    async with state_condition:
+        _bump_version()
         state_condition.notify_all()
 
 
@@ -62,10 +82,7 @@ async def room_event_loop() -> None:
             else:
                 await asyncio.wait_for(room_wakeup.wait(), timeout=max(delay, 0.001))
         except asyncio.TimeoutError:
-            async with state_condition:
-                game.process_room_events(game.room)
-                _bump_version()
-                state_condition.notify_all()
+            await _run_tick()
 
 
 @app.get("/", include_in_schema=False)
@@ -124,7 +141,7 @@ async def room_state(after: Optional[int] = Query(default=None, ge=0)):
     room = game.room
 
     # Если клиент запрашивает «после той же версии» — ждём новую,
-    # но НЕ дольше STATE_LONGPOLL_SECONDS, чтобы соединение не висело.
+    # но НЕ дольше STATE_LONGPOLL_SECONDS.
     if after is not None:
         try:
             async with state_condition:
@@ -141,9 +158,10 @@ async def room_state(after: Optional[int] = Query(default=None, ge=0)):
         except asyncio.CancelledError:
             raise
 
-    # Симулируем «в момент запроса», чтобы клиент не получал устаревшее
-    # состояние (танк, который уже должен быть мёртв, но ещё жив в снапшоте).
-    async with state_condition:
-        game.process_room_events(room)
+    # Тик ВНЕ state_condition — long-poll'ы других клиентов не блокируются.
+    # _state_lock защищает от параллельных тиков.
+    await _run_tick()
 
-    return game.room_state(room)
+    # Снимок собираем под коротким локом, чтобы не пересечься с тиком.
+    async with state_condition:
+        return game.room_state(room)
